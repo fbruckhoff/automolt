@@ -136,7 +136,6 @@ uv run ruff format .
 
 - High-level and subsystem docs live under `docs/`.
 - `README.md` stays product-facing and operational.
-- Deep implementation details belong in living docs (see `docs/_INDEX.md`).
 
 ## Contributing
 
