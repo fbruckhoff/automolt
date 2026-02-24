@@ -127,6 +127,7 @@ class _HeartbeatMonitorRenderer:
 )
 @click.option(
     "--dry",
+    "dry_run",
     is_flag=True,
     help="Show what would run without executing heartbeat cycles.",
 )
