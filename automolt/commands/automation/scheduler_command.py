@@ -126,7 +126,7 @@ class _HeartbeatMonitorRenderer:
     help="Agent handle to tick immediately. Defaults to session active agent.",
 )
 @click.option(
-    "--dry-run",
+    "--dry",
     is_flag=True,
     help="Show what would run without executing heartbeat cycles.",
 )

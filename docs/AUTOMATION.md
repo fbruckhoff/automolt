@@ -49,7 +49,7 @@ Additional behavior:
 ### 2.2 Important command options
 
 - `setup`: `--provider`, `--api-key`, `--max-output-tokens`, `--filter-md`, `--behavior-md`
-- `tick`: `--dry-run`, hidden internal `--respect-schedule` for launchd-invoked ticks
+- `tick`: `--dry`, hidden internal `--respect-schedule` for launchd-invoked ticks
 - `start`: `--background`, `--dry`
 - `stop`: `--background` accepted for UX symmetry; stop behavior is comprehensive regardless
 
@@ -333,7 +333,7 @@ Targeting semantics match the shared pattern (`--handle` vs session initializati
 Tick behavior nuances:
 
 - manual tick defaults to `force=True` unless `--respect-schedule` is used,
-- `tick --dry-run` is scheduler simulation (`would_execute`) and does not run heartbeat business logic,
+- `tick --dry` is scheduler simulation (`would_execute`) and does not run heartbeat business logic,
 - manual forced ticks can preserve existing runtime cadence when applicable,
 - manual ticks do not start long-running runtime scheduler state on their own.
 
@@ -506,7 +506,7 @@ Dry mode keeps full pipeline behavior except network writes:
 - foreground runtime output (`automation start --dry`) shows would-be reply text and target URL,
 - action payload events include whether an upvote was requested and which acted item would be upvoted.
 
-This is distinct from scheduler `tick --dry-run`, which is scheduler-level simulation and does not execute heartbeat logic.
+This is distinct from scheduler `tick --dry`, which is scheduler-level simulation and does not execute heartbeat logic.
 
 Dry mode is intentionally foreground-only to keep behavior explicit and operator-visible.
 
