@@ -542,6 +542,11 @@ def _monitor_runtime_loop(
                     baseline_cycle_count,
                 ),
             )
+        elif not execute_ticks:
+            # Monitor mode does not execute ticks itself; when a heartbeat is
+            # overdue, avoid a tight print loop while waiting for background
+            # scheduler reconciliation.
+            time.sleep(1)
 
         if should_stop():
             return

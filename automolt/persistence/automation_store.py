@@ -43,10 +43,13 @@ CREATE INDEX IF NOT EXISTS idx_items_analyzed
 ON items (analyzed) WHERE analyzed = 0
 """
 
+UNREPLIED_ITEM_WHERE_CLAUSE = "(replied_item_id IS NULL OR TRIM(replied_item_id) = '')"
+ACTED_ITEM_WHERE_CLAUSE = "(replied_item_id IS NOT NULL AND TRIM(replied_item_id) <> '')"
+
 LIST_STATUS_WHERE_CLAUSES = {
     "pending-analysis": "WHERE analyzed = 0",
-    "pending-action": "WHERE analyzed = 1 AND is_relevant = 1 AND replied_item_id IS NULL",
-    "acted": "WHERE replied_item_id IS NOT NULL",
+    "pending-action": f"WHERE analyzed = 1 AND is_relevant = 1 AND {UNREPLIED_ITEM_WHERE_CLAUSE}",
+    "acted": f"WHERE {ACTED_ITEM_WHERE_CLAUSE}",
 }
 
 LIST_STATUS_QUERIES_WITH_LIMIT = {status: f"SELECT * FROM items {where_clause} ORDER BY created_at DESC LIMIT ?" for status, where_clause in LIST_STATUS_WHERE_CLAUSES.items()}
@@ -89,9 +92,9 @@ def _ensure_items_table_schema(conn: sqlite3.Connection) -> None:
 def prune_old_items(base_path: Path, handle: str, cutoff_days: int) -> int:
     """Delete items older than cutoff_days that we did NOT act upon.
 
-    Deletes items where replied_item_id IS NULL and created_at is older than
-    the cutoff. This includes items analyzed as irrelevant. If the search API
-    returns them again in a future cycle, they will be re-inserted and
+    Deletes items where replied_item_id is null/empty and created_at is older
+    than the cutoff. This includes items analyzed as irrelevant. If the search
+    API returns them again in a future cycle, they will be re-inserted and
     re-analyzed.
 
     Args:
@@ -108,10 +111,39 @@ def prune_old_items(base_path: Path, handle: str, cutoff_days: int) -> int:
 
     with sqlite3.connect(db_path) as conn:
         cursor = conn.execute(
-            "DELETE FROM items WHERE created_at < ? AND replied_item_id IS NULL",
+            f"DELETE FROM items WHERE created_at < ? AND {UNREPLIED_ITEM_WHERE_CLAUSE}",
             (cutoff_iso,),
         )
         return cursor.rowcount
+
+
+def list_pending_action_items_oldest(base_path: Path, handle: str) -> list[QueueItem]:
+    """List pending-action rows ordered by created_at ASC.
+
+    Pending-action rows are relevant analyzed items that do not yet have a
+    non-empty reply item id.
+
+    Args:
+        base_path: The root directory of the automolt client.
+        handle: The agent's handle.
+
+    Returns:
+        Pending-action queue items ordered oldest first.
+    """
+    db_path = get_db_path(base_path, handle)
+
+    if not db_path.exists():
+        return []
+
+    init_db(base_path, handle)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"SELECT * FROM items WHERE analyzed = 1 AND is_relevant = 1 AND {UNREPLIED_ITEM_WHERE_CLAUSE} ORDER BY created_at ASC"
+        ).fetchall()
+
+    return [_row_to_queue_item(row) for row in rows]
 
 
 def insert_items(base_path: Path, handle: str, items: list[QueueItem]) -> InsertItemsResult:

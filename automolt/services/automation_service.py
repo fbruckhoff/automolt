@@ -207,8 +207,9 @@ class AutomationService:
             3. Prune old items.
             4. If no unanalyzed items exist: search + enqueue (deduped).
             5. Scan unanalyzed items oldest-first in the same cycle.
-            6. Stop scan on first acted item, or backlog exhaustion.
-            7. Persist heartbeat timestamp once at cycle completion.
+            6. If search inserted zero rows and no item was acted: retry pending-action backlog.
+            7. Stop scan on first acted item, or backlog exhaustion.
+            8. Persist heartbeat timestamp once at cycle completion.
 
         Args:
             handle: The agent's handle.
@@ -232,6 +233,9 @@ class AutomationService:
         if pruned > 0:
             logger.info("Pruned %d old items for '%s'.", pruned, handle)
 
+        search_inserted: automation_store.InsertItemsResult | None = None
+        acted_this_cycle = False
+
         if not automation_store.has_unanalyzed(self._base_path, handle):
             self._emit_heartbeat_event(
                 execution_options,
@@ -242,15 +246,15 @@ class AutomationService:
                     dry_run=execution_options.dry_run_actions,
                 ),
             )
-            inserted = self._search_and_enqueue(handle, config)
+            search_inserted = self._search_and_enqueue(handle, config)
             self._emit_heartbeat_event(
                 execution_options,
                 HeartbeatEvent(
                     event_type=HeartbeatEventType.SEARCH_COMPLETED,
                     handle=handle,
                     search_query=config.automation.search_query,
-                    discovered_posts=inserted.posts,
-                    discovered_comments=inserted.comments,
+                    discovered_posts=search_inserted.posts,
+                    discovered_comments=search_inserted.comments,
                     dry_run=execution_options.dry_run_actions,
                 ),
             )
@@ -285,9 +289,91 @@ class AutomationService:
                 execution_options=execution_options,
             )
             if outcome == ItemProcessingOutcome.ACTED:
+                acted_this_cycle = True
                 break
 
+        should_retry_pending_action = (
+            not acted_this_cycle and search_inserted is not None and search_inserted.total == 0
+        )
+        if should_retry_pending_action:
+            if provider_config is None:
+                provider_config = self._load_global_provider_config()
+                behavior_prompt = self._load_required_prompt(handle, "behavior")
+                action_system_prompt = self._load_required_system_prompt(ACTION_SYSTEM_PROMPT_NAME)
+
+            pending_acted = self._process_pending_action_backlog(
+                handle=handle,
+                config=config,
+                provider_config=provider_config,
+                behavior_prompt=behavior_prompt,
+                action_system_prompt=action_system_prompt,
+                execution_options=execution_options,
+            )
+            if pending_acted:
+                logger.info("Pending-action retry acted on at least one item for '%s'.", handle)
+
         self._persist_heartbeat_timestamp(config)
+
+    def _process_pending_action_backlog(
+        self,
+        *,
+        handle: str,
+        config: AgentConfig,
+        provider_config: LLMProviderConfig,
+        behavior_prompt: str | None,
+        action_system_prompt: str | None,
+        execution_options: HeartbeatExecutionOptions,
+    ) -> bool:
+        """Retry action execution for persisted pending-action queue items.
+
+        Returns:
+            True when at least one pending item was acted on; otherwise False.
+        """
+        pending_items = automation_store.list_pending_action_items_oldest(self._base_path, handle)
+        if not pending_items:
+            return False
+
+        search_service = SearchService(api_client=self._api)
+        for pending_item in pending_items:
+            post_id = self._resolve_post_id(pending_item)
+            if post_id is None:
+                logger.warning(
+                    "Pending-action item '%s' for '%s' is missing post context.",
+                    pending_item.item_id,
+                    handle,
+                )
+                continue
+
+            content_text = search_service.get_queue_item_content(
+                config.agent.api_key,
+                pending_item.item_type,
+                pending_item.item_id,
+                post_id,
+            )
+            if content_text is None or not content_text.strip():
+                logger.info(
+                    "Pending-action item '%s' for '%s' skipped because content is unavailable.",
+                    pending_item.item_id,
+                    handle,
+                )
+                continue
+
+            outcome = self._execute_action_for_relevant_item(
+                handle=handle,
+                config=config,
+                item=pending_item,
+                post_id=post_id,
+                content_text=content_text,
+                provider_config=provider_config,
+                behavior_prompt=behavior_prompt,
+                action_system_prompt=action_system_prompt,
+                analysis_rationale=pending_item.relevance_rationale or "pending-action-retry",
+                execution_options=execution_options,
+            )
+            if outcome == ItemProcessingOutcome.ACTED:
+                return True
+
+        return False
 
     def _search_and_enqueue(self, handle: str, config: AgentConfig) -> automation_store.InsertItemsResult:
         """Search for new content and insert into the queue.
@@ -309,7 +395,6 @@ class AutomationService:
         queue_items: list[QueueItem] = []
         for result in response.results:
             if result.type not in SUPPORTED_QUEUE_ITEM_TYPES:
-                logger.warning("Skipping unsupported search result type '%s' for '%s'.", result.type, handle)
                 continue
 
             queue_items.append(
@@ -457,12 +542,41 @@ class AutomationService:
             relevance_rationale=analysis_decision.relevance_rationale,
         )
 
+        return self._execute_action_for_relevant_item(
+            handle=handle,
+            config=config,
+            item=item,
+            post_id=post_id,
+            content_text=content_text,
+            provider_config=provider_config,
+            behavior_prompt=behavior_prompt,
+            action_system_prompt=action_system_prompt,
+            analysis_rationale=analysis_decision.relevance_rationale,
+            execution_options=execution_options,
+        )
+
+    def _execute_action_for_relevant_item(
+        self,
+        *,
+        handle: str,
+        config: AgentConfig,
+        item: QueueItem,
+        post_id: str,
+        content_text: str,
+        provider_config: LLMProviderConfig,
+        behavior_prompt: str | None,
+        action_system_prompt: str | None,
+        analysis_rationale: str,
+        execution_options: HeartbeatExecutionOptions,
+    ) -> ItemProcessingOutcome:
+        """Execute action stage for an item already classified as relevant."""
+
         if behavior_prompt is None:
             self._finalize_item(
                 handle,
                 item.item_id,
                 is_relevant=True,
-                relevance_rationale=analysis_decision.relevance_rationale,
+                relevance_rationale=analysis_rationale,
             )
             logger.warning("Missing or empty behavior prompt for '%s'.", handle)
             return ItemProcessingOutcome.RELEVANT_NOT_ACTED
@@ -472,7 +586,7 @@ class AutomationService:
                 handle,
                 item.item_id,
                 is_relevant=True,
-                relevance_rationale=analysis_decision.relevance_rationale,
+                relevance_rationale=analysis_rationale,
             )
             logger.warning("Missing or empty ACTION_SYS.md in client root for '%s'.", handle)
             return ItemProcessingOutcome.RELEVANT_NOT_ACTED
@@ -484,7 +598,7 @@ class AutomationService:
             item=item,
             content_text=content_text,
             behavior_prompt=behavior_prompt,
-            analysis_rationale=analysis_decision.relevance_rationale,
+            analysis_rationale=analysis_rationale,
             system_prompt=action_system_prompt,
         )
         if action_plan is None:
@@ -492,7 +606,7 @@ class AutomationService:
                 handle,
                 item.item_id,
                 is_relevant=True,
-                relevance_rationale=analysis_decision.relevance_rationale,
+                relevance_rationale=analysis_rationale,
             )
             self._write_action_outcome_log(
                 handle=handle,
@@ -515,7 +629,7 @@ class AutomationService:
                 handle,
                 item.item_id,
                 is_relevant=True,
-                relevance_rationale=analysis_decision.relevance_rationale,
+                relevance_rationale=analysis_rationale,
             )
             self._write_action_outcome_log(
                 handle=handle,
@@ -545,7 +659,7 @@ class AutomationService:
                 handle,
                 item.item_id,
                 is_relevant=True,
-                relevance_rationale=analysis_decision.relevance_rationale,
+                relevance_rationale=analysis_rationale,
                 replied_item_id=DRY_RUN_REPLIED_ITEM_ID,
             )
             self._emit_heartbeat_event(
@@ -595,7 +709,7 @@ class AutomationService:
                 handle,
                 item.item_id,
                 is_relevant=True,
-                relevance_rationale=analysis_decision.relevance_rationale,
+                relevance_rationale=analysis_rationale,
             )
             self._write_action_outcome_log(
                 handle=handle,
@@ -618,7 +732,7 @@ class AutomationService:
             handle,
             item.item_id,
             is_relevant=True,
-            relevance_rationale=analysis_decision.relevance_rationale,
+            relevance_rationale=analysis_rationale,
             replied_item_id=replied_item_id,
         )
 
