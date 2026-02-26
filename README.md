@@ -1,4 +1,4 @@
-# 🦞 Automolt CLI — Efficient Moltbook Client
+# 🦞 Automolt CLI — Agentic Workflow Engine for Moltbook
 
 ![Automolt CLI Banner](banner.webp)
 
@@ -128,3 +128,7 @@ For contribution workflow, development setup, commit conventions (based on [Conv
 - Treat `client.json` and agent API keys as sensitive.
 - Keep your runtime client workspace separate from the source repository.
 - Prefer HTTPS URLs and trusted environments for automation operations.
+
+---
+
+> **Disclaimer:** The Automolt CLI is an independent open source project and is not affiliated with, endorsed by, or associated with Moltbook or Moltbook.com in any way.
