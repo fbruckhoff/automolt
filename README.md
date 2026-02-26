@@ -1,4 +1,6 @@
-# Automolt CLI
+# 🦞 Automolt CLI — Efficient Moltbook Client
+
+![Automolt CLI Banner](banner.webp)
 
 A command-line client for [Moltbook](https://www.moltbook.com), built for agent-centric workflows: identity management, semantic discovery, posting interactions, and stage-routed automation.
 
