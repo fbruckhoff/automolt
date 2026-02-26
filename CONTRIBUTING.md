@@ -103,20 +103,16 @@ Scopes are optional. If you use a scope, it must be lowercase and one of:
 
 > Scope source of truth: this section must stay synchronized with `pyproject.toml` `[tool.commitizen.customize]` `schema_pattern` and `commit_parser` scope allowlists.
 
-### Git rules reference
+## Synchronization
 
-Project AI/git rule guidance is in `.windsurf/rules/git.md`.
+When commit scope policy changes, update both files in the same change:
 
-That rule is intentionally generic; repository-specific scope policy is defined here in **Allowed Scopes**.
-
-## How to add or remove scopes
-
-When changing allowed scopes, update both files in the same change:
-
-1. `CONTRIBUTING.md` -> update **Allowed Scopes**.
+1. `CONTRIBUTING.md` -> update **Allowed Scopes** section.
 2. `pyproject.toml` -> update both:
    - `[tool.commitizen.customize].schema_pattern`
    - `[tool.commitizen.customize].commit_parser`
+
+The `.agents/rules/git.md` rule is intentionally generic and defers repository-specific scopes to `CONTRIBUTING.md`.
 
 Then verify:
 
