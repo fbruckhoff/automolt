@@ -444,9 +444,12 @@ class SchedulerService:
         except FileNotFoundError as exc:
             raise RuntimeError("launchctl is not available on this system.") from exc
 
+        # Launchd triggers are a polling mechanism; due-time enforcement still
+        # happens in run_tick(). Using the full heartbeat interval here can
+        # cause missed cycles when launchd fires slightly before due time.
         launchd_result = self.install_launchd_scheduler(
             handle=normalized_handle,
-            interval_seconds=self.get_effective_interval_seconds(normalized_handle),
+            interval_seconds=MINIMUM_INTERVAL_SECONDS,
             label=resolved_label,
             overwrite=True,
         )
