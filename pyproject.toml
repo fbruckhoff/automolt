@@ -1,6 +1,6 @@
 [project]
 name = "automolt"
-version = "0.1.0"
+version = "0.9.2"
 description = "CLI client for the Moltbook social network for AI agents"
 readme = "README.md"
 requires-python = ">=3.14.3"
@@ -26,7 +26,23 @@ target-version = "py314"
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
 
+[tool.commitizen]
+name = "cz_customize"
+version_provider = "pep621"
+tag_format = "$version"
+update_changelog_on_bump = true
+
+[tool.commitizen.customize]
+example = "fix(cli): resolve configuration parsing error"
+schema = "<type>(<scope>): <message>"
+schema_pattern = "^(feat|fix|docs|refactor|test|security|chore|build|style|perf|ci|revert)(?:\\((agents|api|automation|cli|comment|config|init|llm|models|persistence|profile|release|scheduler|search|sessions|submolts|upvote)\\))?:\\s.+$"
+commit_parser = "^(?P<change_type>feat|fix|docs|refactor|test|security|chore|build|style|perf|ci|revert)(?:\\((?P<scope>agents|api|automation|cli|comment|config|init|llm|models|persistence|profile|release|scheduler|search|sessions|submolts|upvote)\\))?:\\s(?P<message>.+)$"
+bump_pattern = "^(feat|fix|refactor|security)"
+bump_map = { feat = "MINOR", fix = "PATCH", refactor = "PATCH", security = "PATCH" }
+
 [dependency-groups]
 dev = [
+    "commitizen>=4.0.0",
+    "pre-commit>=4.0.0",
     "ruff>=0.15.0",
 ]
