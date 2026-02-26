@@ -32,13 +32,23 @@ uv run pre-commit install --hook-type commit-msg
 uv tool install --editable --reinstall .
 ```
 
+### IDE integration (Windsurf)
+
+If using Windsurf on macOS, manually create symlinks for IDE integration:
+
+```bash
+ln -sf ../.agents/rules .windsurf/rules
+ln -sf ../.agents/skills .windsurf/skills
+ln -sf ../.agents/workflows .windsurf/workflows
+```
+
 When dependencies or entry points change in `pyproject.toml`, rerun:
 
 ```bash
 uv tool install --editable --reinstall .
 ```
 
-## Daily workflow
+## Workflow
 
 1. Create a focused branch.
 2. Make changes with clear scope.
