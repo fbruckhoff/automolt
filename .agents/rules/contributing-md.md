@@ -38,4 +38,4 @@ Synchronization rule:
 
 ## Git rules reference
 
-Ensure `CONTRIBUTING.md` mentions `.windsurf/rules/git.md` and clarifies that repository-specific scope policy lives in `CONTRIBUTING.md`.
+Ensure `CONTRIBUTING.md` mentions `.agents/rules/git.md` and clarifies that repository-specific scope policy lives in `CONTRIBUTING.md`.

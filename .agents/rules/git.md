@@ -47,12 +47,6 @@ Versioning follows Semantic Versioning.
 
 When Commitizen is configured, follow the repository's configured bump map.
 
-## Release command
+## Commit strategy
 
-Use the repository's configured release command/tooling.
-
-For this repository, use:
-
-```bash
-uv run cz bump --changelog
-```
+If there are several pending commits to be made, they must be ordered to prioritize functional fixes first, then infrastructure, then structural changes, then documentation, then build changes, etc. This ensures that critical fixes are available even if later commits need to be reverted or adjusted.

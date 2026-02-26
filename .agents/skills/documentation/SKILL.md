@@ -11,7 +11,7 @@ If implementation work was requested from a `*-IMPL.md` directive, run this work
 
 Primary rule to apply:
 
-- `.windsurf/rules/documentation.md`
+- `.agents/rules/documentation.md`
 
 ## Trigger Heuristics
 
