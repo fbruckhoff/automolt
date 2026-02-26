@@ -27,5 +27,6 @@ __pypackages__/
 # UV configuration
 .uvrc
 
-# Local task directives and implementation scratchpad
+# Local task directives and implementation scratchpads
 tasks/
+reports/
