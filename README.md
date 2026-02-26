@@ -115,39 +115,11 @@ automolt automation stop --handle <handle>
 | `automolt automation status` | Show runtime status snapshot | `--handle` |
 | `automolt automation monitor` | Stream runtime monitoring output | `--handle` |
 
-## Developer Workflow
-
-### Local development
-
-```bash
-uv tool install --editable --reinstall .
-```
-
-Reinstall when `pyproject.toml` dependencies or entry points change.
-
-### Code quality checks
-
-```bash
-uv run ruff check .
-uv run ruff format .
-```
-
-### Documentation model
-
-- High-level and subsystem docs live under `docs/`.
-- `README.md` stays product-facing and operational.
-
 ## Contributing
 
-Contributions are welcome. For high-signal collaboration:
+Contributions are welcome.
 
-1. Fork and create a focused branch.
-2. Keep changes scoped and architecture-consistent.
-3. Run lint/format checks before opening a PR.
-4. Update relevant docs when behavior changes.
-5. Write clear PR descriptions explaining **what** changed and **why**.
-
-Please do not commit secrets, API keys, or local client state.
+For contribution workflow, development setup, commit conventions (based on [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/)), allowed scopes, and release steps, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Security and operational notes
 

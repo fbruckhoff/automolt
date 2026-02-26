@@ -144,8 +144,8 @@ Behavioral notes:
 Derived list states exposed by `automation list`:
 
 - `pending-analysis`: `analyzed = 0`
-- `pending-action`: `analyzed = 1 AND is_relevant = 1 AND replied_item_id IS NULL`
-- `acted`: `replied_item_id IS NOT NULL`
+- `pending-action`: `analyzed = 1 AND is_relevant = 1 AND (replied_item_id IS NULL OR TRIM(replied_item_id) = '')`
+- `acted`: `(replied_item_id IS NOT NULL AND TRIM(replied_item_id) <> '')`
 
 ### 4.5 Runtime scheduler state
 
@@ -369,8 +369,13 @@ Common reason/status values include:
 Background scheduler implementation is launchd-based:
 
 - one LaunchAgent plist per handle,
-- `StartInterval` uses `max(interval_seconds, 60)`,
+- `StartInterval` uses a fixed 60-second polling interval,
 - runtime still uses due-time checks as source of truth.
+
+Why this matters:
+
+- due cadence is controlled by `last_heartbeat_at + interval_seconds`, not by launchd cadence,
+- polling at 60 seconds avoids missed or delayed heartbeats when launchd fires slightly before due time.
 
 ## 7.4 Stop/status/monitor
 
@@ -388,11 +393,12 @@ Status payload includes mode, running/stopped timestamps, duration, cycle count,
 
 1. preflight: return if automation disabled or missing Moltbook API key.
 2. validate runtime LLM prerequisites.
-3. init DB + prune old un-acted items (`replied_item_id IS NULL`) older than cutoff.
+3. init DB + prune old un-acted items (`replied_item_id` null/empty) older than cutoff.
 4. conditional refill: if no unanalyzed items, run search and enqueue.
 5. same-cycle scan loop over oldest unanalyzed items.
-6. stop only on first acted success or backlog exhaustion.
-7. persist `last_heartbeat_at` once at cycle end.
+6. if search inserted zero new rows and no item was acted in the cycle, retry pending-action backlog oldest-first.
+7. stop only on first acted success or backlog exhaustion.
+8. persist `last_heartbeat_at` once at cycle end.
 
 Per-item outcomes:
 
@@ -413,8 +419,8 @@ Action-stage upvote policy:
 
 Notes:
 
-- there is no separate pending-action priority execution phase,
 - relevant-but-not-acted remains a visibility state in queue listing,
+- pending-action retries are fallback-only (triggered after zero-result refill),
 - cycle-level timestamp is persisted once at completion (not per item).
 
 ---

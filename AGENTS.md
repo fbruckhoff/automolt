@@ -26,6 +26,8 @@ Before scanning source files, read `docs/_INDEX.md` and then the relevant living
 - httpx
 - OpenAI Python SDK
 - Ruff
+- Commitizen
+- pre-commit
 - UV
 
 ## Packaging and Imports
@@ -43,13 +45,25 @@ automolt = "automolt.main:main"
 
 ## Dependency Management
 
-When dependencies or entry points change in `pyproject.toml`, reinstall the tool from repository root:
+For contributor machine setup, run from repository root:
+
+```bash
+make dev-setup
+```
+
+When dependencies or entry points change in `pyproject.toml`, reinstall the CLI tool from repository root:
 
 ```bash
 uv tool install --editable --reinstall .
 ```
 
 Editable install symlinks source code, so routine Python and documentation edits are reflected immediately.
+
+## Commit Conventions and Scope Sync
+
+- Follow `CONTRIBUTING.md` as the repository source of truth for contributor workflow, commit conventions, and release process.
+- Repository-specific commit scope allowlist lives in `CONTRIBUTING.md` under **Allowed Scopes**.
+- Keep `CONTRIBUTING.md` **Allowed Scopes** synchronized with `pyproject.toml` Commitizen scope enforcement (`schema_pattern` and `commit_parser`).
 
 ## Architecture
 
