@@ -34,7 +34,7 @@ uv tool install --editable --reinstall .
 
 ### IDE integration (Windsurf)
 
-If using Windsurf on macOS, manually create symlinks for IDE integration:
+If using Windsurf on macOS, create symlinks for IDE integration:
 
 ```bash
 ln -sf ../.agents/rules .windsurf/rules
@@ -149,15 +149,7 @@ Release command:
 uv run cz bump --changelog
 ```
 
-This updates `pyproject.toml`, updates `CHANGELOG.md`, and creates a git tag.
-
-For repositories adopting this flow with pre-existing non-conforming commit history, create a one-time baseline tag before the first bump:
-
-```bash
-git tag 0.9.2
-```
-
-(`0.9.2` is used instead of `v0.9.2` because `tag_format = "$version"`.)
+This updates `pyproject.toml`, updates `CHANGELOG.md`, and creates a git tag for the new version.
 
 ## Security reminders
 
