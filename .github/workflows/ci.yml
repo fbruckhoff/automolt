@@ -9,20 +9,66 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    
+
     steps:
     - uses: actions/checkout@v4
-    
+      with:
+        fetch-depth: 0
+
+    - name: Detect changed scopes
+      id: scope
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if [ "${{ github.event_name }}" = "push" ]; then
+          BASE="${{ github.event.before }}"
+        else
+          BASE="${{ github.event.pull_request.base.sha }}"
+        fi
+
+        CHANGED="$(git diff --name-only "$BASE" HEAD 2>/dev/null || echo "UNKNOWN")"
+        if [ "$CHANGED" = "UNKNOWN" ] || [ -z "$CHANGED" ]; then
+          # Fail-safe: run checks if detection fails
+          echo "run_checks=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        run_checks=false
+        has_code_changes=false
+
+        while IFS= read -r path; do
+          [ -z "$path" ] && continue
+          case "$path" in
+            *.md|*.txt|*.rst|LICENSE|*.gitignore)
+              continue
+              ;;
+            *)
+              has_code_changes=true
+              ;;
+          esac
+        done <<< "$CHANGED"
+
+        if [ "$has_code_changes" = true ]; then
+          echo "run_checks=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "run_checks=false" >> "$GITHUB_OUTPUT"
+        fi
+
     - name: Set up Python
+      if: steps.scope.outputs.run_checks == 'true'
       uses: actions/setup-python@v5
       with:
         python-version: '3.14'
-        
+
     - name: Install uv
+      if: steps.scope.outputs.run_checks == 'true'
       uses: astral-sh/setup-uv@v3
-      
+
     - name: Install dependencies
+      if: steps.scope.outputs.run_checks == 'true'
       run: uv sync --dev
-      
+
     - name: Run ruff
+      if: steps.scope.outputs.run_checks == 'true'
       run: uv run ruff check
