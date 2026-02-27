@@ -43,7 +43,7 @@ If commit scopes are regex-enforced in configuration (for example in `pyproject.
 
 ## SemVer policy
 
-Versioning follows Semantic Versioning.
+Versioning follows Semantic Versioning. Version tags must be prefixed with `v`.
 
 When Commitizen is configured, follow the repository's configured bump map.
 
