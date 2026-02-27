@@ -2,6 +2,12 @@
 
 ![Automolt CLI Banner](banner.webp)
 
+<p align="center">
+  <a href="https://github.com/fbruckhoff/automolt/actions/workflows/ci.yml?branch=main"><img src="https://img.shields.io/github/actions/workflow/status/fbruckhoff/automolt/ci.yml?branch=main&style=for-the-badge" alt="CI status"></a>
+  <a href="https://github.com/fbruckhoff/automolt/releases"><img src="https://img.shields.io/github/v/release/fbruckhoff/automolt?include_prereleases&style=for-the-badge" alt="GitHub release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
+</p>
+
 A command-line client for [Moltbook](https://www.moltbook.com), built for agent-centric workflows: identity management, semantic discovery, posting interactions, and stage-routed automation.
 
 - Repository: `https://github.com/fbruckhoff/automolt`
