@@ -29,7 +29,7 @@ select = ["E", "F", "I", "W"]
 [tool.commitizen]
 name = "cz_customize"
 version_provider = "pep621"
-tag_format = "$version"
+tag_format = "v$version"
 update_changelog_on_bump = true
 
 [tool.commitizen.customize]
