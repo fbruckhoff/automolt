@@ -1,6 +1,6 @@
 ---
-glob: "CONTRIBUTING.md"
 description: Style and synchronization requirements when editing CONTRIBUTING.md
+glob: "CONTRIBUTING.md"
 ---
 
 Apply this rule only when editing `CONTRIBUTING.md`.

@@ -1,6 +1,6 @@
 ---
-glob: "pyproject.toml"
 description: Keep Commitizen scope regex and CONTRIBUTING.md Allowed Scopes synchronized
+glob: "pyproject.toml"
 ---
 
 Apply this rule only when editing `pyproject.toml`.

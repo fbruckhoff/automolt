@@ -1,6 +1,6 @@
 ---
-glob: "README.md"
 description: Style and scope constraints when editing README.md
+glob: "README.md"
 ---
 
 Apply this rule only when editing `README.md`.

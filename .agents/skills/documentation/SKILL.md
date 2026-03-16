@@ -1,13 +1,11 @@
 ---
 name: documentation
-description: Consolidate implementation directives into living documentation with strict capture tracking, code verification, discrepancy reporting, and one-by-one directive deletion. Use whenever prompts involve `-IMPL.md` specs/directives and documentation updates.
+description: Update living documentation from active Execution Plans and implemented behavior. Use for explicit documentation updates, verification, or docs refactors.
 ---
 
 # Documentation Consolidation Skill
 
-Use this skill whenever the task includes one or more implementation directive/specification markdown files (typically `*-IMPL.md`) and asks to consolidate them into living docs.
-
-If implementation work was requested from a `*-IMPL.md` directive, run this workflow automatically after implementation is complete.
+Use this skill for documentation work. It is not the default for every implementation task.
 
 Primary rule to apply:
 
@@ -17,37 +15,43 @@ Primary rule to apply:
 
 Apply this skill when the user request includes any of:
 
-- "consolidate" + implementation directive/spec
-- source files ending in `-IMPL.md`
-- requests to verify capture completeness
-- requests to delete directive files only after verification
-- requests to create discrepancy reports under `/tasks`
+- explicit requests to update or audit docs under `docs/**`
+- requests to validate documentation claims against code
+- requests to refactor design-doc boundaries or frontmatter coverage
+- requests to reconcile docs with an active ExecPlan (Execution Plan) in `docs/exec-plans/active/`
 
 ## Required Workflow
 
-1. Read all source directives and target docs.
-2. Consolidate into living documentation only (no implementation instructions).
-3. Build/update a capture checklist in `/tasks`, item-by-item.
-4. Verify new facts against code and write/update `/tasks/<TARGET_DOC_STEM>-IMPL.md`.
-5. Delete directives one-by-one only after full capture + verification.
-6. Run final integrity checks (deleted files gone, stale references resolved, docs consistent).
+1. Read source ExecPlan context and target docs.
+2. Discover target docs with progressive disclosure: `ARCHITECTURE.md` -> `docs/design-docs/_index.md` -> relevant docs in `docs/`.
+3. Select doc update depth: `skip`, `minimal`, or `full`.
+4. Consolidate into living documentation only (no implementation instructions).
+5. Verify new facts against code.
+6. Record discrepancies and major decisions in the source ExecPlan.
+7. If documentation work is deferred, add an item to `docs/exec-plans/tech-debt-tracker.md`.
+8. Run final integrity checks (claims verified, docs index/status updated where applicable).
 
 Execution timing:
 
-- If a prompt asks to implement a `*-IMPL.md` directive, apply this workflow at the end of that implementation cycle.
-- If a prompt directly asks for consolidation/verification, apply this workflow immediately.
+- If a prompt directly asks for documentation consolidation/verification, apply this workflow immediately.
+- If a prompt is implementation-only and does not include doc-impact changes, do not apply this workflow.
 
 ## Hard Constraints
 
-- Treat `/tasks` as directive/report location.
-- Treat `/docs` as living documentation location.
-- Never delete directive files before complete verification.
+- Do not introduce or rely on deprecated legacy directive/report paths.
+- Treat `/docs` as category-structured living docs:
+  - `docs/design-docs/`
+  - `docs/product-specs/`
+  - `docs/references/`
+  - `docs/generated/` (generated artifacts)
+- Treat `docs/exec-plans/` as versioned plan artifacts.
 - Record every discrepancy explicitly.
-- If no discrepancy exists, state this explicitly in the verification report.
+- If no discrepancy exists, state this explicitly in the ExecPlan note/update.
+- When creating/updating design docs, update `docs/design-docs/_index.md` with verification status.
 
 ## Output Expectations
 
-- Updated documentation file(s) in `/docs`.
-- Updated capture checklist in `/tasks`.
-- Verification/discrepancy report in `/tasks`.
-- Controlled one-by-one deletion audit trail.
+- Updated documentation file(s) in `/docs/**`.
+- Verified documentation claims against code.
+- Source ExecPlan updated with doc decisions/discrepancies.
+- Debt tracker updated only when docs work is intentionally deferred.

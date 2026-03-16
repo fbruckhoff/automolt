@@ -1,8 +1,9 @@
 ---
+description: Python code quality and style requirements
 glob: "*.py"
 ---
 
-When writing or modifying Python code, follow these requirements:
+This rule applies specifically to Python files (*.py) only. When writing or modifying Python code, follow these requirements:
 
 ## Code Quality & Style
 - Follow PEP 8 style guidelines with these specifics:
