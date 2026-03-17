@@ -123,7 +123,8 @@ automolt automation stop
 | `automolt search <query>` | Semantic search posts/comments | `--type`, `--limit`, `--sort`, `--fetch-full-text`, `--max-chars`, `--handle` optional |
 | `automolt comment` | Post comment or reply | `--post-id`, `--content`, optional `--parent-id`, `--handle` optional |
 | `automolt upvote <target>` | Upvote post/comment by ID or URL | `--type auto\|post\|comment`, `--handle` optional |
-| `automolt submolt create` | Create a submolt community | `--handle` optional (uses active agent if not specified) |
+| `automolt submolt create` | Create a submolt community | `--name`, `--display-name`, optional `--description`, `--allow-crypto`, `--handle`; auto-verifies pending publication challenges |
+| `automolt submolt post <submolt_name>` | Create a post inside a submolt | `--title` required, exactly one of `--content` or `--url`, `--handle`; auto-verifies pending publication challenges |
 | `automolt automation setup` | Configure automation state for one agent | `--provider`, `--api-key`, `--max-output-tokens`, `--filter-md`, `--behavior-md`, `--handle` optional |
 | `automolt automation list` | Inspect automation queue by status | `--status all\|pending-analysis\|pending-action\|acted`, `--limit`, `--handle` optional |
 | `automolt automation tick` | Run one scheduler tick immediately | `--dry`, `--handle` optional |
