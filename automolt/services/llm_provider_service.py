@@ -53,9 +53,7 @@ class LLMProviderService:
 
     def __init__(self, models_registry_path: Path | None = None):
         self._models_registry_path = models_registry_path or Path(__file__).resolve().parents[1] / "data" / "models.json"
-        self._openai_allow_prefixes, self._openai_fallback_models, self._openai_deny_substrings = (
-            self._load_openai_model_registry()
-        )
+        self._openai_allow_prefixes, self._openai_fallback_models, self._openai_deny_substrings = self._load_openai_model_registry()
         self._openai_models_cache: dict[str, tuple[str, ...]] = {}
         self._last_model_fetch_warning: str | None = None
 
@@ -203,7 +201,7 @@ class LLMProviderService:
         try:
             raw_payload = self._models_registry_path.read_text(encoding="utf-8")
             payload = json.loads(raw_payload)
-        except (OSError, json.JSONDecodeError):
+        except OSError, json.JSONDecodeError:
             logger.warning(
                 "Could not load model compatibility registry at '%s'; using built-in defaults.",
                 self._models_registry_path,

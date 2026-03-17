@@ -292,9 +292,7 @@ class AutomationService:
                 acted_this_cycle = True
                 break
 
-        should_retry_pending_action = (
-            not acted_this_cycle and search_inserted is not None and search_inserted.total == 0
-        )
+        should_retry_pending_action = not acted_this_cycle and search_inserted is not None and search_inserted.total == 0
         if should_retry_pending_action:
             if provider_config is None:
                 provider_config = self._load_global_provider_config()

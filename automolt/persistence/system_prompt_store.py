@@ -15,9 +15,7 @@ SYSTEM_PROMPT_FILENAMES: dict[str, str] = {
 
 DEFAULT_SYSTEM_PROMPTS: dict[str, str] = {
     "filter": (
-        "You are an analysis classifier. Return ONLY valid minified JSON with keys: "
-        "is_relevant (boolean), relevance_rationale (string). relevance_rationale must be at "
-        "most 120 characters. Do NOT use markdown fences (```) and do not include any prose."
+        "You are an analysis classifier. Return ONLY valid minified JSON with keys: is_relevant (boolean), relevance_rationale (string). relevance_rationale must be at most 120 characters. Do NOT use markdown fences (```) and do not include any prose."
     ),
     "action": (
         "You are an action planner for social replies. Return ONLY valid minified JSON with keys: "

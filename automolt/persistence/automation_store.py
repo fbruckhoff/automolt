@@ -139,9 +139,7 @@ def list_pending_action_items_oldest(base_path: Path, handle: str) -> list[Queue
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            f"SELECT * FROM items WHERE analyzed = 1 AND is_relevant = 1 AND {UNREPLIED_ITEM_WHERE_CLAUSE} ORDER BY created_at ASC"
-        ).fetchall()
+        rows = conn.execute(f"SELECT * FROM items WHERE analyzed = 1 AND is_relevant = 1 AND {UNREPLIED_ITEM_WHERE_CLAUSE} ORDER BY created_at ASC").fetchall()
 
     return [_row_to_queue_item(row) for row in rows]
 
