@@ -454,9 +454,7 @@ def _collect_missing_setup_requirements(
 
         system_prompt_text = system_prompt_path.read_text(encoding="utf-8").strip()
         if len(system_prompt_text) < MIN_REQUIRED_PROMPT_CHARACTERS:
-            missing.append(
-                f"{system_prompt_filename} must contain at least {MIN_REQUIRED_PROMPT_CHARACTERS} characters."
-            )
+            missing.append(f"{system_prompt_filename} must contain at least {MIN_REQUIRED_PROMPT_CHARACTERS} characters.")
 
     for prompt_name in ("filter", "behavior"):
         prompt_path = prompt_store.get_prompt_path(base_path, handle, prompt_name)
@@ -703,12 +701,7 @@ def _validate_system_prompt_files(base_path: Path, console: Console, ctx: click.
     if not incomplete_system_prompts:
         return
 
-    console.print(
-        "[red]Automation setup cannot continue: "
-        f"{', '.join(incomplete_system_prompts)} must each contain at least "
-        f"{MIN_REQUIRED_PROMPT_CHARACTERS} characters in the client root (next to client.json)."
-        "[/red]"
-    )
+    console.print(f"[red]Automation setup cannot continue: {', '.join(incomplete_system_prompts)} must each contain at least {MIN_REQUIRED_PROMPT_CHARACTERS} characters in the client root (next to client.json).[/red]")
     console.print(f"[dim]Run '{CLI_NAME} init' in this client directory to restore missing defaults, then retry setup.[/dim]")
     ctx.exit(1)
 

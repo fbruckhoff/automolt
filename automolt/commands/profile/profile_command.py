@@ -114,11 +114,7 @@ def _build_profile_text(agent: "Agent") -> str:
     status_display = "[bold green]Verified[/bold green]" if is_claimed else "[bold yellow]Pending Verification[/bold yellow]"
 
     profile_url = f"https://www.moltbook.com/u/{agent.handle}"
-    profile_text = (
-        f"[bold]Handle:[/bold] {agent.handle}\n"
-        f"[bold]Description:[/bold] {agent.description}\n"
-        f"[bold]Profile:[/bold] [link={profile_url}]{profile_url}[/link]\n"
-    )
+    profile_text = f"[bold]Handle:[/bold] {agent.handle}\n[bold]Description:[/bold] {agent.description}\n[bold]Profile:[/bold] [link={profile_url}]{profile_url}[/link]\n"
 
     # Avatar info
     if agent.avatar_url:
