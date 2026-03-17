@@ -183,7 +183,7 @@ class MoltbookClient:
         except httpx.HTTPError as exc:
             raise self._handle_http_error(exc) from exc
 
-    def create_submolt(self, api_key: str, name: str, display_name: str, description: str) -> dict[str, Any]:
+    def create_submolt(self, api_key: str, name: str, display_name: str, description: str | None = None, allow_crypto: bool = False) -> dict[str, Any]:
         """Create a new submolt (community) via POST /submolts.
 
         Args:
@@ -191,6 +191,7 @@ class MoltbookClient:
             name: URL-friendly name (lowercase, no spaces).
             display_name: Human-readable display name.
             description: What the submolt is about.
+            allow_crypto: Whether cryptocurrency content is allowed.
 
         Returns:
             The raw JSON response dict containing the submolt data.
@@ -198,9 +199,69 @@ class MoltbookClient:
         Raises:
             MoltbookAPIError: If creation fails.
         """
-        payload = {"name": name, "display_name": display_name, "description": description}
+        payload: dict[str, Any] = {
+            "name": name,
+            "display_name": display_name,
+            "allow_crypto": allow_crypto,
+        }
+        if description is not None:
+            payload["description"] = description
         try:
             response = self._http.post("/submolts", headers=self._auth_headers(api_key), json=payload)
+            return self._handle_response(response)
+        except httpx.HTTPError as exc:
+            raise self._handle_http_error(exc) from exc
+
+    def create_post(self, api_key: str, submolt_name: str, title: str, content: str | None = None, url: str | None = None) -> dict[str, Any]:
+        """Create a new post via POST /posts.
+
+        Args:
+            api_key: The agent's API key for authentication.
+            submolt_name: The target submolt name.
+            title: The post title.
+            content: Optional text body for a text post.
+            url: Optional link URL for a link post.
+
+        Returns:
+            The raw JSON response dict containing the post data.
+
+        Raises:
+            MoltbookAPIError: If creation fails.
+        """
+        payload: dict[str, Any] = {
+            "submolt_name": submolt_name,
+            "title": title,
+        }
+        if content is not None:
+            payload["content"] = content
+            payload["type"] = "text"
+        if url is not None:
+            payload["url"] = url
+            payload["type"] = "link"
+
+        try:
+            response = self._http.post("/posts", headers=self._auth_headers(api_key), json=payload)
+            return self._handle_response(response)
+        except httpx.HTTPError as exc:
+            raise self._handle_http_error(exc) from exc
+
+    def verify_content(self, api_key: str, verification_code: str, answer: str) -> dict[str, Any]:
+        """Submit a verification answer via POST /verify.
+
+        Args:
+            api_key: The agent's API key for authentication.
+            verification_code: Verification code from a pending content response.
+            answer: Computed numeric answer formatted as text.
+
+        Returns:
+            The raw verification response payload.
+
+        Raises:
+            MoltbookAPIError: If verification fails.
+        """
+        payload = {"verification_code": verification_code, "answer": answer}
+        try:
+            response = self._http.post("/verify", headers=self._auth_headers(api_key), json=payload)
             return self._handle_response(response)
         except httpx.HTTPError as exc:
             raise self._handle_http_error(exc) from exc

@@ -6,7 +6,8 @@ Handles creating comments via the Moltbook API.
 from typing import Any
 
 from automolt.api.client import MoltbookAPIError, MoltbookClient
-from automolt.models.post import CommentCreateResponse
+from automolt.models.post import CommentCreateResponse, PostCreateResponse
+from automolt.services.content_verification_service import ContentVerificationService
 
 
 class PostService:
@@ -14,6 +15,39 @@ class PostService:
 
     def __init__(self, api_client: MoltbookClient):
         self._api = api_client
+        self._verification = ContentVerificationService(api_client)
+
+    def create_post(self, api_key: str, submolt_name: str, title: str, content: str | None = None, url: str | None = None) -> PostCreateResponse:
+        """Create a post in a submolt on Moltbook."""
+        normalized_submolt_name = submolt_name.strip()
+        normalized_title = title.strip()
+        normalized_content = content.strip() if content is not None else None
+        normalized_url = url.strip() if url is not None else None
+
+        if not normalized_submolt_name:
+            raise ValueError("Submolt name cannot be empty.")
+        if not normalized_title:
+            raise ValueError("Post title cannot be empty.")
+        if normalized_content and normalized_url:
+            raise ValueError("Post must include either content or url, not both.")
+        if not normalized_content and not normalized_url:
+            raise ValueError("Post must include content or url.")
+
+        raw_response = self._api.create_post(
+            api_key,
+            normalized_submolt_name,
+            normalized_title,
+            content=normalized_content,
+            url=normalized_url,
+        )
+        raw_response, verification_completed = self._verification.verify_if_required(api_key, raw_response, "post")
+
+        if "post" not in raw_response:
+            raise MoltbookAPIError(message="Unexpected API response: missing 'post' key")
+
+        post_payload = dict(raw_response["post"])
+        post_payload["verification_completed"] = verification_completed
+        return PostCreateResponse.model_validate(post_payload)
 
     def add_comment(self, api_key: str, post_id: str, content: str, parent_id: str | None = None) -> CommentCreateResponse:
         """Add a comment to a post on Moltbook.
