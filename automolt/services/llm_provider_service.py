@@ -45,6 +45,7 @@ DEFAULT_OPENAI_RESPONSES_DENY_SUBSTRINGS: tuple[str, ...] = (
 DEFAULT_STAGE_MODELS: dict[AutomationStage, str] = {
     AutomationStage.ANALYSIS: "gpt-4o-mini",
     AutomationStage.ACTION: "gpt-4o-mini",
+    AutomationStage.SUBMOLT_PLANNER: "gpt-4o-mini",
 }
 
 

@@ -6,6 +6,8 @@ that search for content, and managing the automation queue.
 
 import json
 import logging
+import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -16,15 +18,17 @@ from automolt.api.client import MoltbookAPIError, MoltbookClient
 from automolt.constants import CLI_NAME
 from automolt.models.agent import AgentConfig, AutomationLLM, AutomationStage, StageLLMConfig
 from automolt.models.automation import QueueItem
-from automolt.models.llm import ActionPlan, AnalysisDecision
+from automolt.models.llm import ActionPlan, AnalysisDecision, SubmoltPlannerPlan
 from automolt.models.llm_provider import LLMProvider, LLMProviderConfig
 from automolt.persistence import agent_store, automation_log_store, automation_store, prompt_store, system_prompt_store
+from automolt.persistence.automation_log_store import AutomationEventStatus
 from automolt.persistence.client_store import load_client_config
 from automolt.services.base_llm_client import LLMClientError
 from automolt.services.llm_execution_service import LLMExecutionService
 from automolt.services.llm_provider_service import LLMProviderService
 from automolt.services.post_service import PostService
 from automolt.services.search_service import SearchService
+from automolt.services.submolt_service import SubmoltService
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +39,13 @@ MOLTBOOK_WEB_BASE_URL = "https://www.moltbook.com"
 MIN_REQUIRED_PROMPT_CHARACTERS = 10
 ANALYSIS_SYSTEM_PROMPT_NAME = "filter"
 ACTION_SYSTEM_PROMPT_NAME = "action"
+SUBMOLT_SYSTEM_PROMPT_NAME = "submolt_planner"
+BEHAVIOR_SUBMOLT_PROMPT_NAME = "behavior_submolt"
+
+DEFAULT_SUBMOLT_CREATE_INTERVAL_HOURS = 24
+DEFAULT_SUBMOLT_MAX_CREATIONS_PER_DAY = 1
+MAX_SUBMOLT_POLICY_TOPIC_LENGTH = 200
+MAX_SUBMOLT_SOURCE_SUMMARY_LENGTH = 240
 
 
 class ItemProcessingOutcome(str, Enum):
@@ -54,6 +65,10 @@ class HeartbeatEventType(str, Enum):
     ANALYSIS_COMPLETED = "analysis_completed"
     ACTION_DRY_RUN = "action_dry_run"
     ACTION_POSTED = "action_posted"
+    PLANNER_EVALUATED = "planner_evaluated"
+    PLANNER_SKIPPED = "planner_skipped"
+    PLANNER_ACTED = "planner_acted"
+    PLANNER_FAILED = "planner_failed"
 
 
 @dataclass(frozen=True)
@@ -75,6 +90,11 @@ class HeartbeatEvent:
     upvote_target_type: str | None = None
     upvote_target_id: str | None = None
     upvote_message: str | None = None
+    planner_status: str | None = None
+    planner_reason: str | None = None
+    planner_trigger: str | None = None
+    planner_submolt_name: str | None = None
+    planner_post_id: str | None = None
     dry_run: bool = False
 
 
@@ -89,6 +109,43 @@ class HeartbeatExecutionOptions:
     observer: HeartbeatObserver | None = None
 
 
+@dataclass(frozen=True)
+class SubmoltPlannerPolicy:
+    """Parsed BEHAVIOR_SUBMOLT policy controls used by deterministic guards."""
+
+    enabled: bool
+    interval_hours: int
+    max_creations_per_day: int
+    topic_policy: str | None
+    allowed_topics: tuple[str, ...]
+    name_prefix: str | None
+    policy_body: str
+
+
+@dataclass(frozen=True)
+class SubmoltPlannerContext:
+    """Runtime metadata included in planner prompt payloads."""
+
+    source_trigger: str
+    current_utc: datetime
+    last_submolt_created_at_utc: datetime | None
+    hours_since_last_submolt_creation: float | None
+    source_item_id: str | None = None
+    source_item_type: str | None = None
+    source_post_id: str | None = None
+    source_submolt_name: str | None = None
+    source_item_summary: str | None = None
+
+
+@dataclass(frozen=True)
+class SubmoltPlannerEvaluationResult:
+    """Planner stage evaluation result for one heartbeat cycle."""
+
+    acted: bool
+    status: str
+    reason: str
+
+
 class AutomationService:
     """Service for automation setup and heartbeat cycle execution."""
 
@@ -96,6 +153,7 @@ class AutomationService:
         self._api = api_client
         self._base_path = base_path
         self._post_service = PostService(api_client=api_client)
+        self._submolt_service = SubmoltService(api_client=api_client)
         self._llm_provider_service = LLMProviderService()
         self._llm_execution_service = LLMExecutionService()
 
@@ -160,6 +218,7 @@ class AutomationService:
         self._validate_stage_selection(AutomationStage.ANALYSIS, llm_config.analysis)
 
         self._validate_stage_selection(AutomationStage.ACTION, llm_config.action)
+        self._validate_stage_selection(AutomationStage.SUBMOLT_PLANNER, llm_config.submolt_planner)
 
     def validate_runtime_llm_prerequisites(self, config: AgentConfig) -> None:
         """Validate persisted LLM settings for runtime scheduler prerequisites.
@@ -233,10 +292,17 @@ class AutomationService:
         if pruned > 0:
             logger.info("Pruned %d old items for '%s'.", pruned, handle)
 
+        provider_config = self._load_global_provider_config()
+        planner_evaluation = self._evaluate_submolt_planner_for_cycle(
+            handle=handle,
+            config=config,
+            provider_config=provider_config,
+            execution_options=execution_options,
+        )
+        acted_this_cycle = planner_evaluation.acted
         search_inserted: automation_store.InsertItemsResult | None = None
-        acted_this_cycle = False
 
-        if not automation_store.has_unanalyzed(self._base_path, handle):
+        if not acted_this_cycle and not automation_store.has_unanalyzed(self._base_path, handle):
             self._emit_heartbeat_event(
                 execution_options,
                 HeartbeatEvent(
@@ -259,43 +325,41 @@ class AutomationService:
                 ),
             )
 
-        provider_config: LLMProviderConfig | None = None
         filter_prompt: str | None = None
         behavior_prompt: str | None = None
         analysis_system_prompt: str | None = None
         action_system_prompt: str | None = None
 
-        while True:
-            next_item = automation_store.get_next_unanalyzed(self._base_path, handle)
-            if next_item is None:
-                break
+        if not acted_this_cycle:
+            while True:
+                next_item = automation_store.get_next_unanalyzed(self._base_path, handle)
+                if next_item is None:
+                    break
 
-            if provider_config is None:
-                provider_config = self._load_global_provider_config()
-                filter_prompt = self._load_required_prompt(handle, "filter")
-                behavior_prompt = self._load_required_prompt(handle, "behavior")
-                analysis_system_prompt = self._load_required_system_prompt(ANALYSIS_SYSTEM_PROMPT_NAME)
-                action_system_prompt = self._load_required_system_prompt(ACTION_SYSTEM_PROMPT_NAME)
+                if filter_prompt is None:
+                    filter_prompt = self._load_required_prompt(handle, "filter")
+                    behavior_prompt = self._load_required_prompt(handle, "behavior")
+                    analysis_system_prompt = self._load_required_system_prompt(ANALYSIS_SYSTEM_PROMPT_NAME)
+                    action_system_prompt = self._load_required_system_prompt(ACTION_SYSTEM_PROMPT_NAME)
 
-            outcome = self._analyze_item(
-                handle,
-                config,
-                next_item,
-                provider_config=provider_config,
-                filter_prompt=filter_prompt,
-                behavior_prompt=behavior_prompt,
-                analysis_system_prompt=analysis_system_prompt,
-                action_system_prompt=action_system_prompt,
-                execution_options=execution_options,
-            )
-            if outcome == ItemProcessingOutcome.ACTED:
-                acted_this_cycle = True
-                break
+                outcome = self._analyze_item(
+                    handle,
+                    config,
+                    next_item,
+                    provider_config=provider_config,
+                    filter_prompt=filter_prompt,
+                    behavior_prompt=behavior_prompt,
+                    analysis_system_prompt=analysis_system_prompt,
+                    action_system_prompt=action_system_prompt,
+                    execution_options=execution_options,
+                )
+                if outcome == ItemProcessingOutcome.ACTED:
+                    acted_this_cycle = True
+                    break
 
         should_retry_pending_action = not acted_this_cycle and search_inserted is not None and search_inserted.total == 0
         if should_retry_pending_action:
-            if provider_config is None:
-                provider_config = self._load_global_provider_config()
+            if behavior_prompt is None:
                 behavior_prompt = self._load_required_prompt(handle, "behavior")
                 action_system_prompt = self._load_required_system_prompt(ACTION_SYSTEM_PROMPT_NAME)
 
@@ -311,6 +375,773 @@ class AutomationService:
                 logger.info("Pending-action retry acted on at least one item for '%s'.", handle)
 
         self._persist_heartbeat_timestamp(config)
+
+    def reload_submolt_policy(self, handle: str) -> SubmoltPlannerPolicy:
+        """Force re-parse and persistence refresh for BEHAVIOR_SUBMOLT policy."""
+        policy, parse_warning = self._refresh_submolt_policy(handle, force_reload=True)
+        if parse_warning:
+            raise ValueError(parse_warning)
+        if policy is None:
+            raise ValueError("BEHAVIOR_SUBMOLT.md is missing or contains no usable policy.")
+        return policy
+
+    def _evaluate_submolt_planner_for_cycle(
+        self,
+        *,
+        handle: str,
+        config: AgentConfig,
+        provider_config: LLMProviderConfig,
+        execution_options: HeartbeatExecutionOptions,
+    ) -> SubmoltPlannerEvaluationResult:
+        """Evaluate and optionally execute planner-first submolt automation for one cycle."""
+        policy, parse_warning = self._refresh_submolt_policy(handle)
+        if parse_warning:
+            self._emit_heartbeat_event(
+                execution_options,
+                HeartbeatEvent(
+                    event_type=HeartbeatEventType.PLANNER_FAILED,
+                    handle=handle,
+                    planner_status=AutomationEventStatus.FAILED.value,
+                    planner_reason=parse_warning,
+                    planner_trigger="scheduled",
+                    dry_run=execution_options.dry_run_actions,
+                ),
+            )
+            automation_log_store.write_automation_event(
+                self._base_path,
+                handle,
+                event_type="planner_policy_error",
+                source_trigger="scheduled",
+                status=AutomationEventStatus.FAILED,
+                error_summary=parse_warning,
+            )
+
+        if policy is None:
+            reason = "behavior-submolt-unavailable"
+            self._emit_heartbeat_event(
+                execution_options,
+                HeartbeatEvent(
+                    event_type=HeartbeatEventType.PLANNER_SKIPPED,
+                    handle=handle,
+                    planner_status=AutomationEventStatus.SKIPPED.value,
+                    planner_reason=reason,
+                    planner_trigger="scheduled",
+                    dry_run=execution_options.dry_run_actions,
+                ),
+            )
+            return SubmoltPlannerEvaluationResult(acted=False, status=AutomationEventStatus.SKIPPED.value, reason=reason)
+
+        if not policy.enabled:
+            reason = "planner-disabled-by-policy"
+            self._emit_heartbeat_event(
+                execution_options,
+                HeartbeatEvent(
+                    event_type=HeartbeatEventType.PLANNER_SKIPPED,
+                    handle=handle,
+                    planner_status=AutomationEventStatus.SKIPPED.value,
+                    planner_reason=reason,
+                    planner_trigger="scheduled",
+                    dry_run=execution_options.dry_run_actions,
+                ),
+            )
+            automation_log_store.write_automation_event(
+                self._base_path,
+                handle,
+                event_type="planner_skip",
+                source_trigger="scheduled",
+                status=AutomationEventStatus.SKIPPED,
+                error_summary=reason,
+            )
+            return SubmoltPlannerEvaluationResult(acted=False, status=AutomationEventStatus.SKIPPED.value, reason=reason)
+
+        planner_context = self._build_submolt_planner_context(handle=handle, source_trigger="scheduled")
+        guard_failure_reason = self._evaluate_submolt_runtime_guards(
+            handle=handle,
+            policy=policy,
+            planner_context=planner_context,
+            requested_submolt_name=None,
+        )
+        if guard_failure_reason is not None:
+            self._emit_heartbeat_event(
+                execution_options,
+                HeartbeatEvent(
+                    event_type=HeartbeatEventType.PLANNER_SKIPPED,
+                    handle=handle,
+                    planner_status=AutomationEventStatus.SKIPPED.value,
+                    planner_reason=guard_failure_reason,
+                    planner_trigger="scheduled",
+                    dry_run=execution_options.dry_run_actions,
+                ),
+            )
+            automation_log_store.write_automation_event(
+                self._base_path,
+                handle,
+                event_type="planner_skip",
+                source_trigger="scheduled",
+                status=AutomationEventStatus.SKIPPED,
+                error_summary=guard_failure_reason,
+            )
+            return SubmoltPlannerEvaluationResult(
+                acted=False,
+                status=AutomationEventStatus.SKIPPED.value,
+                reason=guard_failure_reason,
+            )
+
+        planner_system_prompt = self._load_required_system_prompt(SUBMOLT_SYSTEM_PROMPT_NAME)
+        planner_behavior_prompt = self._load_required_prompt(handle, BEHAVIOR_SUBMOLT_PROMPT_NAME)
+        if planner_system_prompt is None or planner_behavior_prompt is None:
+            reason = "planner-prompts-unavailable"
+            self._emit_heartbeat_event(
+                execution_options,
+                HeartbeatEvent(
+                    event_type=HeartbeatEventType.PLANNER_SKIPPED,
+                    handle=handle,
+                    planner_status=AutomationEventStatus.SKIPPED.value,
+                    planner_reason=reason,
+                    planner_trigger="scheduled",
+                    dry_run=execution_options.dry_run_actions,
+                ),
+            )
+            return SubmoltPlannerEvaluationResult(acted=False, status=AutomationEventStatus.SKIPPED.value, reason=reason)
+
+        planner_plan = self._run_submolt_planner_stage(
+            config=config,
+            provider_config=provider_config,
+            handle=handle,
+            planner_context=planner_context,
+            policy=policy,
+            behavior_prompt=planner_behavior_prompt,
+            system_prompt=planner_system_prompt,
+        )
+        if planner_plan is None:
+            reason = "planner-stage-failed"
+            self._emit_heartbeat_event(
+                execution_options,
+                HeartbeatEvent(
+                    event_type=HeartbeatEventType.PLANNER_FAILED,
+                    handle=handle,
+                    planner_status=AutomationEventStatus.FAILED.value,
+                    planner_reason=reason,
+                    planner_trigger="scheduled",
+                    dry_run=execution_options.dry_run_actions,
+                ),
+            )
+            automation_log_store.write_automation_event(
+                self._base_path,
+                handle,
+                event_type="planner_failed",
+                source_trigger="scheduled",
+                status=AutomationEventStatus.FAILED,
+                error_summary=reason,
+            )
+            return SubmoltPlannerEvaluationResult(acted=False, status=AutomationEventStatus.FAILED.value, reason=reason)
+
+        return self._execute_submolt_planner_plan(
+            handle=handle,
+            config=config,
+            policy=policy,
+            planner_context=planner_context,
+            planner_plan=planner_plan,
+            source_trigger="scheduled",
+            execution_options=execution_options,
+        )
+
+    def _refresh_submolt_policy(
+        self,
+        handle: str,
+        *,
+        force_reload: bool = False,
+    ) -> tuple[SubmoltPlannerPolicy | None, str | None]:
+        """Refresh cached planner policy when file fingerprint changes or reload is requested."""
+        runtime_state = automation_store.load_behavior_submolt_runtime_state(self._base_path, handle)
+        behavior_path = prompt_store.get_prompt_path(self._base_path, handle, BEHAVIOR_SUBMOLT_PROMPT_NAME)
+        if not behavior_path.is_file():
+            if force_reload:
+                return None, "BEHAVIOR_SUBMOLT.md not found."
+            if runtime_state.behavior_submolt_policy_json:
+                return self._policy_from_json(runtime_state.behavior_submolt_policy_json), None
+            return None, None
+
+        current_stat = os.stat(behavior_path)
+        fingerprint_changed = (
+            runtime_state.behavior_submolt_mtime_ns != current_stat.st_mtime_ns
+            or runtime_state.behavior_submolt_size != current_stat.st_size
+        )
+        if not force_reload and not fingerprint_changed and runtime_state.behavior_submolt_policy_json:
+            return self._policy_from_json(runtime_state.behavior_submolt_policy_json), None
+
+        try:
+            policy_text = prompt_store.read_prompt(self._base_path, handle, BEHAVIOR_SUBMOLT_PROMPT_NAME)
+            parsed_policy = self._parse_submolt_policy_prompt(policy_text)
+        except (OSError, ValueError) as exc:
+            if runtime_state.behavior_submolt_policy_json:
+                return self._policy_from_json(runtime_state.behavior_submolt_policy_json), f"Failed to parse BEHAVIOR_SUBMOLT.md: {exc}"
+            return None, f"Failed to parse BEHAVIOR_SUBMOLT.md: {exc}"
+
+        automation_store.save_behavior_submolt_runtime_state(
+            self._base_path,
+            handle,
+            automation_store.BehaviorSubmoltRuntimeState(
+                behavior_submolt_mtime_ns=current_stat.st_mtime_ns,
+                behavior_submolt_size=current_stat.st_size,
+                behavior_submolt_policy_json=self._policy_to_json(parsed_policy),
+                behavior_submolt_loaded_at_utc=datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        return parsed_policy, None
+
+    def _policy_to_json(self, policy: SubmoltPlannerPolicy) -> str:
+        """Serialize planner policy to JSON for runtime-state persistence."""
+        payload = {
+            "enabled": policy.enabled,
+            "interval_hours": policy.interval_hours,
+            "max_creations_per_day": policy.max_creations_per_day,
+            "topic_policy": policy.topic_policy,
+            "allowed_topics": list(policy.allowed_topics),
+            "name_prefix": policy.name_prefix,
+            "policy_body": policy.policy_body,
+        }
+        return json.dumps(payload, separators=(",", ":"))
+
+    def _policy_from_json(self, policy_json: str) -> SubmoltPlannerPolicy:
+        """Deserialize planner policy from runtime-state persistence."""
+        payload = json.loads(policy_json)
+        return SubmoltPlannerPolicy(
+            enabled=bool(payload.get("enabled", False)),
+            interval_hours=max(int(payload.get("interval_hours", DEFAULT_SUBMOLT_CREATE_INTERVAL_HOURS)), 1),
+            max_creations_per_day=max(int(payload.get("max_creations_per_day", DEFAULT_SUBMOLT_MAX_CREATIONS_PER_DAY)), 1),
+            topic_policy=payload.get("topic_policy"),
+            allowed_topics=tuple(payload.get("allowed_topics", [])),
+            name_prefix=payload.get("name_prefix"),
+            policy_body=str(payload.get("policy_body", "")).strip(),
+        )
+
+    def _parse_submolt_policy_prompt(self, prompt_text: str) -> SubmoltPlannerPolicy:
+        """Parse BEHAVIOR_SUBMOLT.md text into deterministic policy controls."""
+        normalized_prompt = prompt_text.strip()
+        if len(normalized_prompt) < MIN_REQUIRED_PROMPT_CHARACTERS:
+            raise ValueError("BEHAVIOR_SUBMOLT.md must contain at least 10 non-whitespace characters.")
+
+        frontmatter, policy_body = self._extract_policy_frontmatter(normalized_prompt)
+
+        enabled = self._parse_policy_bool(frontmatter.get("submolt_enabled"), default=True)
+        interval_hours = self._parse_policy_int(
+            frontmatter.get("submolt_create_interval_hours"),
+            default=DEFAULT_SUBMOLT_CREATE_INTERVAL_HOURS,
+            minimum=1,
+        )
+        max_creations_per_day = self._parse_policy_int(
+            frontmatter.get("submolt_max_creations_per_day"),
+            default=DEFAULT_SUBMOLT_MAX_CREATIONS_PER_DAY,
+            minimum=1,
+        )
+        topic_policy = self._normalize_optional_policy_text(frontmatter.get("submolt_topic_policy"), MAX_SUBMOLT_POLICY_TOPIC_LENGTH)
+        name_prefix = self._normalize_optional_policy_text(frontmatter.get("submolt_name_prefix"), 40)
+        allowed_topics = self._parse_allowed_topics(frontmatter.get("submolt_allowed_topics"))
+
+        return SubmoltPlannerPolicy(
+            enabled=enabled,
+            interval_hours=interval_hours,
+            max_creations_per_day=max_creations_per_day,
+            topic_policy=topic_policy,
+            allowed_topics=allowed_topics,
+            name_prefix=name_prefix,
+            policy_body=policy_body,
+        )
+
+    def _extract_policy_frontmatter(self, prompt_text: str) -> tuple[dict[str, str], str]:
+        """Extract optional YAML-like frontmatter and return remaining body text."""
+        if not prompt_text.startswith("---"):
+            return {}, prompt_text
+
+        lines = prompt_text.splitlines()
+        if not lines:
+            return {}, prompt_text
+
+        frontmatter_lines: list[str] = []
+        body_start = 1
+        found_closing = False
+        for index, line in enumerate(lines[1:], start=1):
+            if line.strip() == "---":
+                body_start = index + 1
+                found_closing = True
+                break
+            frontmatter_lines.append(line)
+
+        if not found_closing:
+            return {}, prompt_text
+
+        frontmatter: dict[str, str] = {}
+        for line in frontmatter_lines:
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            normalized_key = key.strip().lower()
+            if not normalized_key:
+                continue
+            frontmatter[normalized_key] = value.strip().strip('"').strip("'")
+
+        policy_body = "\n".join(lines[body_start:]).strip()
+        return frontmatter, policy_body
+
+    def _parse_policy_bool(self, raw_value: str | None, *, default: bool) -> bool:
+        """Parse a bool-like policy value with safe defaults."""
+        if raw_value is None:
+            return default
+        normalized = raw_value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        raise ValueError(f"Invalid boolean policy value '{raw_value}'.")
+
+    def _parse_policy_int(self, raw_value: str | None, *, default: int, minimum: int) -> int:
+        """Parse and clamp integer policy values."""
+        if raw_value is None:
+            return default
+        parsed_value = int(raw_value.strip())
+        if parsed_value < minimum:
+            raise ValueError(f"Policy value must be >= {minimum}.")
+        return parsed_value
+
+    def _parse_allowed_topics(self, raw_value: str | None) -> tuple[str, ...]:
+        """Parse optional comma-separated allowed topics."""
+        if raw_value is None:
+            return ()
+        normalized_topics = []
+        for entry in raw_value.split(","):
+            topic = entry.strip()
+            if not topic:
+                continue
+            normalized_topics.append(topic[:80])
+        return tuple(normalized_topics)
+
+    def _normalize_optional_policy_text(self, raw_value: str | None, max_length: int) -> str | None:
+        """Normalize and bound optional policy string fields."""
+        if raw_value is None:
+            return None
+        normalized = raw_value.strip()
+        if not normalized:
+            return None
+        return normalized[:max_length]
+
+    def _build_submolt_planner_context(
+        self,
+        *,
+        handle: str,
+        source_trigger: str,
+        source_item: QueueItem | None = None,
+        source_item_summary: str | None = None,
+    ) -> SubmoltPlannerContext:
+        """Build deterministic planner context from persisted successful events."""
+        now_utc = datetime.now(timezone.utc)
+        last_create_event = automation_log_store.get_last_successful_submolt_creation(self._base_path, handle)
+        if last_create_event is None:
+            last_created_at = None
+            elapsed_hours = None
+        else:
+            last_created_at = last_create_event.created_at_utc
+            if last_created_at.tzinfo is None:
+                last_created_at = last_created_at.replace(tzinfo=timezone.utc)
+            elapsed_hours = max((now_utc - last_created_at).total_seconds() / 3600.0, 0.0)
+
+        return SubmoltPlannerContext(
+            source_trigger=source_trigger,
+            current_utc=now_utc,
+            last_submolt_created_at_utc=last_created_at,
+            hours_since_last_submolt_creation=elapsed_hours,
+            source_item_id=source_item.item_id if source_item else None,
+            source_item_type=source_item.item_type if source_item else None,
+            source_post_id=self._resolve_post_id(source_item) if source_item else None,
+            source_submolt_name=source_item.submolt_name if source_item else None,
+            source_item_summary=self._truncate_source_summary(source_item_summary),
+        )
+
+    def _truncate_source_summary(self, value: str | None) -> str | None:
+        """Normalize optional source-summary text for planner context payloads."""
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+        return normalized[:MAX_SUBMOLT_SOURCE_SUMMARY_LENGTH]
+
+    def _evaluate_submolt_runtime_guards(
+        self,
+        *,
+        handle: str,
+        policy: SubmoltPlannerPolicy,
+        planner_context: SubmoltPlannerContext,
+        requested_submolt_name: str | None,
+    ) -> str | None:
+        """Return a skip reason when deterministic planner guards fail."""
+        if planner_context.hours_since_last_submolt_creation is not None and planner_context.hours_since_last_submolt_creation < policy.interval_hours:
+            return "interval-not-elapsed"
+
+        start_of_day = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        creations_today = automation_log_store.count_successful_submolt_creations_since(self._base_path, handle, start_of_day)
+        if creations_today >= policy.max_creations_per_day:
+            return "max-creations-per-day-reached"
+
+        if requested_submolt_name and automation_log_store.has_successful_submolt_name(self._base_path, handle, requested_submolt_name):
+            return "duplicate-submolt-name"
+
+        return None
+
+    def _run_submolt_planner_stage(
+        self,
+        *,
+        config: AgentConfig,
+        provider_config: LLMProviderConfig,
+        handle: str,
+        planner_context: SubmoltPlannerContext,
+        policy: SubmoltPlannerPolicy,
+        behavior_prompt: str,
+        system_prompt: str,
+    ) -> SubmoltPlannerPlan | None:
+        """Execute planner stage and return parsed structured planner output."""
+        planner_user_prompt = self._build_submolt_planner_user_prompt(
+            planner_context=planner_context,
+            policy=policy,
+            behavior_prompt=behavior_prompt,
+        )
+        planner_prompt_payload = self._build_stage_prompt_payload(system_prompt, planner_user_prompt)
+
+        try:
+            stage_result = self._llm_execution_service.plan_submolt(
+                config=config,
+                provider_config=provider_config,
+                system_prompt=system_prompt,
+                user_prompt=planner_user_prompt,
+            )
+            self._write_stage_log(
+                handle=handle,
+                item_id=planner_context.source_item_id or "planner",
+                stage="submolt-planner",
+                prompt_payload=planner_prompt_payload,
+                response_payload=stage_result.raw_response,
+            )
+            if not isinstance(stage_result.parsed_output, SubmoltPlannerPlan):
+                logger.warning("Submolt planner returned unexpected output model for '%s'.", handle)
+                return None
+            return stage_result.parsed_output
+        except LLMClientError as exc:
+            self._write_stage_log(
+                handle=handle,
+                item_id=planner_context.source_item_id or "planner",
+                stage="submolt-planner",
+                prompt_payload=planner_prompt_payload,
+                response_payload=f"LLMClientError: {exc}",
+            )
+            logger.warning("Submolt planner stage failed for '%s': %s (%s)", handle, exc, exc.reason_code)
+            return None
+
+    def _build_submolt_planner_user_prompt(
+        self,
+        *,
+        planner_context: SubmoltPlannerContext,
+        policy: SubmoltPlannerPolicy,
+        behavior_prompt: str,
+    ) -> str:
+        """Build deterministic planner user prompt including context and policy controls."""
+        context_payload = {
+            "source_trigger": planner_context.source_trigger,
+            "current_utc": planner_context.current_utc.isoformat(),
+            "last_submolt_created_at_utc": planner_context.last_submolt_created_at_utc.isoformat() if planner_context.last_submolt_created_at_utc else None,
+            "hours_since_last_submolt_creation": planner_context.hours_since_last_submolt_creation,
+            "source_item_id": planner_context.source_item_id,
+            "source_item_type": planner_context.source_item_type,
+            "source_post_id": planner_context.source_post_id,
+            "source_submolt_name": planner_context.source_submolt_name,
+            "source_item_summary": planner_context.source_item_summary,
+            "policy": {
+                "interval_hours": policy.interval_hours,
+                "max_creations_per_day": policy.max_creations_per_day,
+                "topic_policy": policy.topic_policy,
+                "allowed_topics": list(policy.allowed_topics),
+                "name_prefix": policy.name_prefix,
+            },
+        }
+        return (
+            "Submolt planner request.\n"
+            f"Context JSON:\n{json.dumps(context_payload, ensure_ascii=True)}\n\n"
+            f"Behavior Submolt Prompt:\n{behavior_prompt}\n"
+        )
+
+    def _execute_submolt_planner_plan(
+        self,
+        *,
+        handle: str,
+        config: AgentConfig,
+        policy: SubmoltPlannerPolicy,
+        planner_context: SubmoltPlannerContext,
+        planner_plan: SubmoltPlannerPlan,
+        source_trigger: str,
+        execution_options: HeartbeatExecutionOptions,
+    ) -> SubmoltPlannerEvaluationResult:
+        """Execute planner side effects and persist automation events."""
+        self._emit_heartbeat_event(
+            execution_options,
+            HeartbeatEvent(
+                event_type=HeartbeatEventType.PLANNER_EVALUATED,
+                handle=handle,
+                planner_status="evaluated",
+                planner_reason=planner_plan.decision_rationale,
+                planner_trigger=source_trigger,
+                dry_run=execution_options.dry_run_actions,
+            ),
+        )
+
+        if not planner_plan.should_create_submolt:
+            reason = "planner-declined-create"
+            automation_log_store.write_automation_event(
+                self._base_path,
+                handle,
+                event_type="planner_skip",
+                source_trigger=source_trigger,
+                status=AutomationEventStatus.SKIPPED,
+                source_item_id=planner_context.source_item_id,
+                error_summary=reason,
+            )
+            self._emit_heartbeat_event(
+                execution_options,
+                HeartbeatEvent(
+                    event_type=HeartbeatEventType.PLANNER_SKIPPED,
+                    handle=handle,
+                    planner_status=AutomationEventStatus.SKIPPED.value,
+                    planner_reason=reason,
+                    planner_trigger=source_trigger,
+                    dry_run=execution_options.dry_run_actions,
+                ),
+            )
+            return SubmoltPlannerEvaluationResult(acted=False, status=AutomationEventStatus.SKIPPED.value, reason=reason)
+
+        normalized_submolt_name = self._normalize_planned_submolt_name(planner_plan.submolt_name, policy.name_prefix)
+        if not normalized_submolt_name:
+            reason = "invalid-submolt-name"
+            automation_log_store.write_automation_event(
+                self._base_path,
+                handle,
+                event_type="planner_failed",
+                source_trigger=source_trigger,
+                status=AutomationEventStatus.FAILED,
+                source_item_id=planner_context.source_item_id,
+                error_summary=reason,
+            )
+            return SubmoltPlannerEvaluationResult(acted=False, status=AutomationEventStatus.FAILED.value, reason=reason)
+
+        guard_failure_reason = self._evaluate_submolt_runtime_guards(
+            handle=handle,
+            policy=policy,
+            planner_context=planner_context,
+            requested_submolt_name=normalized_submolt_name,
+        )
+        if guard_failure_reason is not None:
+            automation_log_store.write_automation_event(
+                self._base_path,
+                handle,
+                event_type="planner_skip",
+                source_trigger=source_trigger,
+                status=AutomationEventStatus.SKIPPED,
+                source_item_id=planner_context.source_item_id,
+                error_summary=guard_failure_reason,
+            )
+            self._emit_heartbeat_event(
+                execution_options,
+                HeartbeatEvent(
+                    event_type=HeartbeatEventType.PLANNER_SKIPPED,
+                    handle=handle,
+                    planner_status=AutomationEventStatus.SKIPPED.value,
+                    planner_reason=guard_failure_reason,
+                    planner_trigger=source_trigger,
+                    dry_run=execution_options.dry_run_actions,
+                ),
+            )
+            return SubmoltPlannerEvaluationResult(
+                acted=False,
+                status=AutomationEventStatus.SKIPPED.value,
+                reason=guard_failure_reason,
+            )
+
+        if execution_options.dry_run_actions:
+            self._emit_heartbeat_event(
+                execution_options,
+                HeartbeatEvent(
+                    event_type=HeartbeatEventType.PLANNER_ACTED,
+                    handle=handle,
+                    planner_status="dry-run",
+                    planner_reason=planner_plan.decision_rationale,
+                    planner_trigger=source_trigger,
+                    planner_submolt_name=normalized_submolt_name,
+                    dry_run=True,
+                ),
+            )
+            return SubmoltPlannerEvaluationResult(acted=True, status="dry-run", reason="dry-run")
+
+        display_name = planner_plan.display_name or normalized_submolt_name.replace("-", " ").title()
+        description = planner_plan.description
+
+        created_submolt_name: str | None = None
+        created_post_id: str | None = None
+        try:
+            submolt_response = self._submolt_service.create_submolt(
+                config.agent.api_key,
+                normalized_submolt_name,
+                display_name,
+                description=description,
+                allow_crypto=planner_plan.allow_crypto,
+            )
+            created_submolt_name = submolt_response.name
+            automation_log_store.write_automation_event(
+                self._base_path,
+                handle,
+                event_type="create_submolt",
+                source_trigger=source_trigger,
+                status=AutomationEventStatus.SUCCESS,
+                submolt_name=created_submolt_name,
+                source_item_id=planner_context.source_item_id,
+            )
+        except (MoltbookAPIError, ValueError) as exc:
+            reason = f"create-submolt-failed: {exc}"
+            automation_log_store.write_automation_event(
+                self._base_path,
+                handle,
+                event_type="create_submolt",
+                source_trigger=source_trigger,
+                status=AutomationEventStatus.FAILED,
+                submolt_name=normalized_submolt_name,
+                source_item_id=planner_context.source_item_id,
+                error_summary=reason,
+            )
+            self._emit_heartbeat_event(
+                execution_options,
+                HeartbeatEvent(
+                    event_type=HeartbeatEventType.PLANNER_FAILED,
+                    handle=handle,
+                    planner_status=AutomationEventStatus.FAILED.value,
+                    planner_reason=reason,
+                    planner_trigger=source_trigger,
+                    planner_submolt_name=normalized_submolt_name,
+                    dry_run=False,
+                ),
+            )
+            return SubmoltPlannerEvaluationResult(acted=False, status=AutomationEventStatus.FAILED.value, reason=reason)
+
+        target_submolt_name = created_submolt_name or normalized_submolt_name
+        if planner_plan.should_post:
+            if not planner_plan.post_title:
+                reason = "planner-post-missing-title"
+                automation_log_store.write_automation_event(
+                    self._base_path,
+                    handle,
+                    event_type="create_post",
+                    source_trigger=source_trigger,
+                    status=AutomationEventStatus.FAILED,
+                    submolt_name=target_submolt_name,
+                    source_item_id=planner_context.source_item_id,
+                    error_summary=reason,
+                )
+            else:
+                try:
+                    post_response = self._post_service.create_post(
+                        config.agent.api_key,
+                        target_submolt_name,
+                        planner_plan.post_title,
+                        content=planner_plan.post_content,
+                        url=planner_plan.post_url,
+                    )
+                    created_post_id = post_response.id
+                    automation_log_store.write_automation_event(
+                        self._base_path,
+                        handle,
+                        event_type="create_post",
+                        source_trigger=source_trigger,
+                        status=AutomationEventStatus.SUCCESS,
+                        submolt_name=target_submolt_name,
+                        post_id=created_post_id,
+                        source_item_id=planner_context.source_item_id,
+                    )
+                except (MoltbookAPIError, ValueError) as exc:
+                    automation_log_store.write_automation_event(
+                        self._base_path,
+                        handle,
+                        event_type="create_post",
+                        source_trigger=source_trigger,
+                        status=AutomationEventStatus.FAILED,
+                        submolt_name=target_submolt_name,
+                        source_item_id=planner_context.source_item_id,
+                        error_summary=f"create-post-failed: {exc}",
+                    )
+
+        if (
+            source_trigger == "reactive"
+            and planner_plan.should_link_in_followup_reply
+            and planner_plan.followup_reply_text
+            and planner_context.source_post_id
+        ):
+            self._post_planner_followup_reply(
+                api_key=config.agent.api_key,
+                planner_context=planner_context,
+                planner_plan=planner_plan,
+                submolt_name=target_submolt_name,
+                created_post_id=created_post_id,
+            )
+
+        self._emit_heartbeat_event(
+            execution_options,
+            HeartbeatEvent(
+                event_type=HeartbeatEventType.PLANNER_ACTED,
+                handle=handle,
+                planner_status=AutomationEventStatus.SUCCESS.value,
+                planner_reason=planner_plan.decision_rationale,
+                planner_trigger=source_trigger,
+                planner_submolt_name=target_submolt_name,
+                planner_post_id=created_post_id,
+                dry_run=False,
+            ),
+        )
+        return SubmoltPlannerEvaluationResult(acted=True, status=AutomationEventStatus.SUCCESS.value, reason="planner-acted")
+
+    def _post_planner_followup_reply(
+        self,
+        *,
+        api_key: str,
+        planner_context: SubmoltPlannerContext,
+        planner_plan: SubmoltPlannerPlan,
+        submolt_name: str,
+        created_post_id: str | None,
+    ) -> None:
+        """Post optional reactive follow-up reply referencing created submolt/post."""
+        if planner_context.source_post_id is None or planner_plan.followup_reply_text is None:
+            return
+
+        followup_url = f"{MOLTBOOK_WEB_BASE_URL}/s/{submolt_name}"
+        if created_post_id:
+            followup_url = f"{MOLTBOOK_WEB_BASE_URL}/post/{created_post_id}"
+
+        followup_text = f"{planner_plan.followup_reply_text}\n\n{followup_url}"
+        try:
+            self._api.add_comment(
+                api_key,
+                planner_context.source_post_id,
+                followup_text[:MAX_ACTION_REPLY_CHARACTERS],
+                parent_id=planner_context.source_item_id if planner_context.source_item_type == "comment" else None,
+            )
+        except MoltbookAPIError:
+            logger.warning("Reactive follow-up reply failed for source item '%s'.", planner_context.source_item_id)
+
+    def _normalize_planned_submolt_name(self, raw_name: str | None, name_prefix: str | None) -> str | None:
+        """Normalize planner-provided submolt names to API-safe slug format."""
+        if raw_name is None:
+            return None
+        normalized = raw_name.strip().lower()
+        normalized = re.sub(r"[^a-z0-9-]+", "-", normalized)
+        normalized = re.sub(r"-{2,}", "-", normalized).strip("-")
+        if name_prefix:
+            prefix = re.sub(r"[^a-z0-9-]+", "-", name_prefix.strip().lower()).strip("-")
+            if prefix and not normalized.startswith(f"{prefix}-"):
+                normalized = f"{prefix}-{normalized}"
+        return normalized or None
 
     def _process_pending_action_backlog(
         self,
@@ -688,6 +1519,15 @@ class AutomationService:
                 upvote_error="dry-run",
                 dry_run=True,
             )
+            self._maybe_execute_reactive_submolt_planner(
+                handle=handle,
+                config=config,
+                provider_config=provider_config,
+                item=item,
+                action_plan=action_plan,
+                source_item_summary=content_text,
+                execution_options=execution_options,
+            )
             return ItemProcessingOutcome.ACTED
 
         try:
@@ -805,7 +1645,109 @@ class AutomationService:
         if replied_item_id is None:
             return ItemProcessingOutcome.RELEVANT_NOT_ACTED
 
+        self._maybe_execute_reactive_submolt_planner(
+            handle=handle,
+            config=config,
+            provider_config=provider_config,
+            item=item,
+            action_plan=action_plan,
+            source_item_summary=content_text,
+            execution_options=execution_options,
+        )
+
         return ItemProcessingOutcome.ACTED
+
+    def _maybe_execute_reactive_submolt_planner(
+        self,
+        *,
+        handle: str,
+        config: AgentConfig,
+        provider_config: LLMProviderConfig,
+        item: QueueItem,
+        action_plan: ActionPlan,
+        source_item_summary: str,
+        execution_options: HeartbeatExecutionOptions,
+    ) -> None:
+        """Run reactive planner when the action stage requests submolt promotion."""
+        if not action_plan.promote_to_submolt:
+            return
+
+        policy, parse_warning = self._refresh_submolt_policy(handle)
+        if parse_warning:
+            automation_log_store.write_automation_event(
+                self._base_path,
+                handle,
+                event_type="planner_policy_error",
+                source_trigger="reactive",
+                status=AutomationEventStatus.FAILED,
+                source_item_id=item.item_id,
+                error_summary=parse_warning,
+            )
+        if policy is None or not policy.enabled:
+            return
+
+        planner_context = self._build_submolt_planner_context(
+            handle=handle,
+            source_trigger="reactive",
+            source_item=item,
+            source_item_summary=source_item_summary,
+        )
+        guard_failure_reason = self._evaluate_submolt_runtime_guards(
+            handle=handle,
+            policy=policy,
+            planner_context=planner_context,
+            requested_submolt_name=None,
+        )
+        if guard_failure_reason is not None:
+            automation_log_store.write_automation_event(
+                self._base_path,
+                handle,
+                event_type="planner_skip",
+                source_trigger="reactive",
+                status=AutomationEventStatus.SKIPPED,
+                source_item_id=item.item_id,
+                error_summary=guard_failure_reason,
+            )
+            return
+
+        planner_system_prompt = self._load_required_system_prompt(SUBMOLT_SYSTEM_PROMPT_NAME)
+        planner_behavior_prompt = self._load_required_prompt(handle, BEHAVIOR_SUBMOLT_PROMPT_NAME)
+        if planner_system_prompt is None or planner_behavior_prompt is None:
+            return
+
+        policy_override = policy
+        if action_plan.promotion_topic:
+            policy_override = SubmoltPlannerPolicy(
+                enabled=policy.enabled,
+                interval_hours=policy.interval_hours,
+                max_creations_per_day=policy.max_creations_per_day,
+                topic_policy=action_plan.promotion_topic,
+                allowed_topics=policy.allowed_topics,
+                name_prefix=policy.name_prefix,
+                policy_body=policy.policy_body,
+            )
+
+        planner_plan = self._run_submolt_planner_stage(
+            config=config,
+            provider_config=provider_config,
+            handle=handle,
+            planner_context=planner_context,
+            policy=policy_override,
+            behavior_prompt=planner_behavior_prompt,
+            system_prompt=planner_system_prompt,
+        )
+        if planner_plan is None:
+            return
+
+        self._execute_submolt_planner_plan(
+            handle=handle,
+            config=config,
+            policy=policy_override,
+            planner_context=planner_context,
+            planner_plan=planner_plan,
+            source_trigger="reactive",
+            execution_options=execution_options,
+        )
 
     def _run_analysis_stage(
         self,
@@ -990,7 +1932,12 @@ class AutomationService:
     ) -> str:
         """Build deterministic user prompt payload for action stage."""
         submolt_name = item.submolt_name or "unknown"
-        return f"Automation action request.\nItem ID: {item.item_id}\nItem Type: {item.item_type}\nSubmolt: {submolt_name}\nAnalysis Rationale: {analysis_rationale}\n\nBehavior Prompt:\n{behavior_prompt}\n\nItem Content:\n{content_text}"
+        return (
+            f"Automation action request.\nItem ID: {item.item_id}\nItem Type: {item.item_type}\nSubmolt: {submolt_name}\n"
+            f"Analysis Rationale: {analysis_rationale}\n"
+            "If this item should trigger reactive submolt promotion, set promote_to_submolt=true and provide promotion_topic.\n\n"
+            f"Behavior Prompt:\n{behavior_prompt}\n\nItem Content:\n{content_text}"
+        )
 
     def _build_stage_prompt_payload(self, system_prompt: str, user_prompt: str) -> str:
         """Serialize the exact stage prompt payload sent to the provider."""
@@ -1159,6 +2106,7 @@ class AutomationService:
         return {
             llm_config.analysis.provider,
             llm_config.action.provider,
+            llm_config.submolt_planner.provider,
         }
 
     def _validate_required_provider_config(

@@ -39,6 +39,7 @@ MIN_REQUIRED_PROMPT_CHARACTERS = 10
 STAGE_TITLES = {
     AutomationStage.ANALYSIS: "analysis",
     AutomationStage.ACTION: "action",
+    AutomationStage.SUBMOLT_PLANNER: "submolt planner",
 }
 
 PROMPT_DESCRIPTIONS = {
@@ -49,6 +50,10 @@ PROMPT_DESCRIPTIONS = {
         "The [bold]behavior prompt[/bold] tells the LLM how to write replies and when to upvote acted-on content. "
         "Describe posting/commenting tone, style, and constraints, plus clear upvote circumstances for items the agent actively replies to. "
         "Automation does not perform downvotes. Example: [italic]'Reply in a friendly, concise tone. Focus on adding value. Upvote only when the acted-on post/comment is clearly helpful.'[/italic]"
+    ),
+    "behavior_submolt": (
+        "The [bold]submolt behavior prompt[/bold] guides planner cadence and policy in `BEHAVIOR_SUBMOLT.md`. "
+        "Define when planner-driven submolt creation is appropriate, what topics are allowed, and any posting constraints."
     ),
 }
 
@@ -83,14 +88,21 @@ PROMPT_DESCRIPTIONS = {
     type=str,
     default=None,
     flag_value="",
-    help="Open or create filter prompt markdown. Pass a path or omit value to edit the default file.",
+    help="Open or create filter prompt markdown in the default prompt file path.",
 )
 @click.option(
     "--behavior-md",
     type=str,
     default=None,
     flag_value="",
-    help="Open or create behavior prompt markdown. Pass a path or omit value to edit the default file.",
+    help="Open or create behavior prompt markdown in the default prompt file path.",
+)
+@click.option(
+    "--behavior-submolt-md",
+    type=str,
+    default=None,
+    flag_value="",
+    help="Open or create submolt behavior prompt markdown in the default prompt file path.",
 )
 @click.pass_context
 def setup(
@@ -101,6 +113,7 @@ def setup(
     max_output_tokens: int | None,
     filter_md: str | None,
     behavior_md: str | None,
+    behavior_submolt_md: str | None,
 ) -> None:
     """Set up automation for a target agent."""
     console: Console = ctx.obj["console"]
@@ -131,6 +144,7 @@ def setup(
             max_output_tokens,
             filter_md,
             behavior_md,
+            behavior_submolt_md,
         )
     )
 
@@ -145,6 +159,7 @@ def setup(
             max_output_tokens=max_output_tokens,
             filter_md=filter_md,
             behavior_md=behavior_md,
+            behavior_submolt_md=behavior_submolt_md,
             llm_provider_service=llm_provider_service,
             automation_service=automation_service,
             console=console,
@@ -167,6 +182,7 @@ def setup(
 
     _collect_prompt_file(base_path, target_handle, "filter", console)
     _collect_prompt_file(base_path, target_handle, "behavior", console)
+    _collect_prompt_file(base_path, target_handle, "behavior_submolt", console)
     _validate_prompt_files(base_path, target_handle, console)
 
     llm_config, provider_config = _collect_llm_configuration(
@@ -290,6 +306,7 @@ def _run_atomic_setup(
     max_output_tokens: int | None,
     filter_md: str | None,
     behavior_md: str | None,
+    behavior_submolt_md: str | None,
     llm_provider_service: LLMProviderService,
     automation_service: AutomationService,
     console: Console,
@@ -308,6 +325,7 @@ def _run_atomic_setup(
             provider_override = _normalize_provider_value(provider, llm_provider_service)
             updated_llm_config.analysis.provider = provider_override
             updated_llm_config.action.provider = provider_override
+            updated_llm_config.submolt_planner.provider = provider_override
             updated_llm_config.analysis.model = _resolve_default_model(
                 llm_provider_service,
                 AutomationStage.ANALYSIS,
@@ -320,7 +338,13 @@ def _run_atomic_setup(
                 provider_override,
                 existing_config.automation.llm.action,
             )
-            status_lines.append(f"[green]--provider[/green]: set both stages to '{provider_override.value}'.")
+            updated_llm_config.submolt_planner.model = _resolve_default_model(
+                llm_provider_service,
+                AutomationStage.SUBMOLT_PLANNER,
+                provider_override,
+                existing_config.automation.llm.submolt_planner,
+            )
+            status_lines.append(f"[green]--provider[/green]: set all stages to '{provider_override.value}'.")
 
         target_provider = provider_override or updated_llm_config.analysis.provider
 
@@ -358,6 +382,17 @@ def _run_atomic_setup(
             )
             status_color = "green" if behavior_success else "red"
             status_lines.append(f"[{status_color}]--behavior-md[/{status_color}]: {behavior_message}")
+
+        if behavior_submolt_md is not None:
+            behavior_submolt_success, behavior_submolt_message = _apply_atomic_prompt_update(
+                base_path=base_path,
+                handle=handle,
+                prompt_name="behavior_submolt",
+                option_value=behavior_submolt_md,
+                console=console,
+            )
+            status_color = "green" if behavior_submolt_success else "red"
+            status_lines.append(f"[{status_color}]--behavior-submolt-md[/{status_color}]: {behavior_submolt_message}")
 
         updated_agent_config.automation.llm = updated_llm_config
         client_config.llm_provider_config = updated_provider_config
@@ -553,14 +588,14 @@ def _prompt_cutoff_days(console: Console, default_cutoff_days: int | None = None
 
 
 def _collect_prompt_file(base_path: Path, handle: str, prompt_name: str, console: Console) -> None:
-    """Collect content for a prompt file (FILTER.md or BEHAVIOR.md).
+    """Collect content for a prompt file (for example FILTER.md or BEHAVIOR.md).
 
     Offers the user two options: edit in default editor, or copy from a file path.
 
     Args:
         base_path: The root directory of the automolt client.
         handle: The agent's handle.
-        prompt_name: Either 'filter' or 'behavior'.
+        prompt_name: Prompt key such as 'filter', 'behavior', or 'behavior_submolt'.
         console: Rich console for output.
     """
     console.print()
@@ -742,11 +777,20 @@ def _collect_llm_configuration(
         provider_config,
         prompted_provider_configs,
     )
+    submolt_planner_stage_config = _prompt_stage_llm_config(
+        console,
+        llm_provider_service,
+        AutomationStage.SUBMOLT_PLANNER,
+        existing_config.automation.llm.submolt_planner,
+        provider_config,
+        prompted_provider_configs,
+    )
 
     return (
         AutomationLLM(
             analysis=analysis_stage_config,
             action=action_stage_config,
+            submolt_planner=submolt_planner_stage_config,
         ),
         provider_config,
     )
@@ -1026,6 +1070,7 @@ def _display_success(
     """
     filter_status = _prompt_file_status(base_path, handle, "filter")
     behavior_status = _prompt_file_status(base_path, handle, "behavior")
+    behavior_submolt_status = _prompt_file_status(base_path, handle, "behavior_submolt")
     filter_system_status = _system_prompt_file_status(base_path, "filter")
     action_system_status = _system_prompt_file_status(base_path, "action")
     agent_dir = base_path / ".agents" / handle
@@ -1040,8 +1085,10 @@ def _display_success(
         f"[bold]ACTION_SYS.md:[/bold] {action_system_status}\n"
         f"[bold]FILTER.md:[/bold] {filter_status}\n"
         f"[bold]BEHAVIOR.md:[/bold] {behavior_status}\n"
+        f"[bold]BEHAVIOR_SUBMOLT.md:[/bold] {behavior_submolt_status}\n"
         f"[bold]Analysis Stage:[/bold] {llm.analysis.provider.value} / {llm.analysis.model}\n"
         f"[bold]Action Stage:[/bold] {llm.action.provider.value} / {llm.action.model}\n"
+        f"[bold]Submolt Planner Stage:[/bold] {llm.submolt_planner.provider.value} / {llm.submolt_planner.model}\n"
         f"[bold]OpenAI API Key (Global):[/bold] {openai_key_status}\n"
         f"[bold]OpenAI max_output_tokens:[/bold] {openai_max_tokens}\n"
         f"[bold]Agent Directory:[/bold] {agent_dir}\n\n"

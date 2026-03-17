@@ -26,6 +26,7 @@ The `automolt automation` group currently includes:
 
 - `setup` - configure automation and LLM settings for one target agent.
 - `list` - inspect queue items by status.
+- `reload` - force re-parse and persistence refresh for `BEHAVIOR_SUBMOLT.md`.
 - `tick` - run one scheduler tick for one target agent.
 - `start` - start runtime loop in foreground, or start LaunchAgent in background.
 - `stop` - stop runtime and unload/remove LaunchAgent if present.
@@ -49,7 +50,8 @@ Additional behavior:
 
 ### 2.2 Important command options
 
-- `setup`: `--provider`, `--api-key`, `--max-output-tokens`, `--filter-md`, `--behavior-md`
+- `setup`: `--provider`, `--api-key`, `--max-output-tokens`, `--filter-md`, `--behavior-md`, `--behavior-submolt-md`
+- `reload`: `--handle`
 - `tick`: `--dry`, hidden internal `--respect-schedule` for launchd-invoked ticks
 - `start`: `--background`, `--dry`
 - `stop`: `--background` accepted for UX symmetry; stop behavior is comprehensive regardless
@@ -92,6 +94,7 @@ Separation of concerns:
 - `cutoff_days`
 - `llm.analysis` (`provider`, `model`)
 - `llm.action` (`provider`, `model`)
+- `llm.submolt_planner` (`provider`, `model`)
 
 ### 4.2 Client config (`client.json`)
 
@@ -112,13 +115,15 @@ Client-root system prompt files (same directory as `client.json`):
 
 - `FILTER_SYS.md` (analysis-stage system contract)
 - `ACTION_SYS.md` (action-stage system contract)
+- `SUBMOLT_PLANNER_SYS.md` (submolt-planner stage system contract)
 
 Per-agent prompt files:
 
 - `.agents/<handle>/FILTER.md`
 - `.agents/<handle>/BEHAVIOR.md`
+- `.agents/<handle>/BEHAVIOR_SUBMOLT.md`
 
-Runtime requires all four files and each must contain at least 10 non-whitespace characters.
+Runtime hard-requires `FILTER_SYS.md`, `ACTION_SYS.md`, `.agents/<handle>/FILTER.md`, and `.agents/<handle>/BEHAVIOR.md`, each with at least 10 non-whitespace characters. Planner-specific files (`SUBMOLT_PLANNER_SYS.md`, `BEHAVIOR_SUBMOLT.md`) are loaded lazily and planner execution is skipped when they are unavailable.
 
 ### 4.4 Queue database (`.agents/<handle>/automation.db`)
 
@@ -148,7 +153,18 @@ Derived list states exposed by `automation list`:
 - `pending-action`: `analyzed = 1 AND is_relevant = 1 AND (replied_item_id IS NULL OR TRIM(replied_item_id) = '')`
 - `acted`: `(replied_item_id IS NOT NULL AND TRIM(replied_item_id) <> '')`
 
-### 4.5 Runtime scheduler state
+### 4.5 Planner runtime metadata (`.agents/<handle>/automation.db`)
+
+`automation_store` now persists planner refresh metadata in table `runtime_state` (`id=1` row):
+
+- `behavior_submolt_mtime_ns`
+- `behavior_submolt_size`
+- `behavior_submolt_policy_json`
+- `behavior_submolt_loaded_at_utc`
+
+These fields support per-tick fingerprint checks (`st_mtime_ns` + `st_size`) and explicit `automation reload` refresh semantics without introducing a watcher daemon.
+
+### 4.6 Runtime scheduler state
 
 Per-agent scheduler state files are stored under:
 
@@ -161,7 +177,7 @@ Background mode also uses LaunchAgent files/logs:
 - `~/.automolt/logs/<label>.out.log`
 - `~/.automolt/logs/<label>.err.log`
 
-### 4.6 Per-item LLM trace logs
+### 4.7 Per-item LLM trace logs and automation event history
 
 For analysis/action stage traces:
 
@@ -174,6 +190,13 @@ Current stage labels include:
 - `analysis`
 - `action`
 - `action-outcome` (records reply/upvote execution outcome, including whether upvote occurred)
+- `submolt-planner`
+
+Planner/runtime events are also persisted in:
+
+- `.agents/<handle>/logs/automation-events.jsonl`
+
+Event payloads include event type, trigger source (`scheduled`/`reactive`), status (`success`/`failed`/`skipped`), timestamps, and optional submolt/post/source-item fields.
 
 Exact separator:
 
@@ -209,17 +232,18 @@ Used when none of these flags are provided:
 - `--max-output-tokens`
 - `--filter-md`
 - `--behavior-md`
+- `--behavior-submolt-md`
 
 Interactive flow:
 
 1. resolve/validate target agent.
 2. prompt `search_query` (non-empty, max 500 chars).
 3. prompt `cutoff_days`.
-4. collect/edit `FILTER.md` and `BEHAVIOR.md`.
-5. prompt stage provider for analysis/action via Rich radio-style numbered choices.
+4. collect/edit `FILTER.md`, `BEHAVIOR.md`, and `BEHAVIOR_SUBMOLT.md`.
+5. prompt stage provider for analysis/action/submolt planner via Rich radio-style numbered choices.
 6. prompt provider config immediately after provider selection (OpenAI key + max output tokens).
 7. fetch OpenAI model catalog dynamically via `client.models.list()` and filter to Responses-compatible models.
-8. prompt stage model for analysis/action via Rich radio-style numbered choices.
+8. prompt stage model for analysis/action/submolt planner via Rich radio-style numbered choices.
 9. if model listing fails or yields no compatible models, fall back to `automolt/data/models.json` `fallback_models` and show a warning panel.
 10. save client config and apply automation setup.
 11. print success panel with system-prompt status, redacted secret status, and max token value.
@@ -252,12 +276,11 @@ Atomic behavior:
 - apply only provided fields,
 - preserve unspecified fields,
 - suppress unrelated prompts,
-- support editor-based prompt updates via `--filter-md` / `--behavior-md`.
+- support editor-based prompt updates via `--filter-md`, `--behavior-md`, and `--behavior-submolt-md`.
 
 Atomic prompt update behavior:
 
-- `--filter-md`/`--behavior-md` without value opens the default prompt file,
-- passing a path creates the file if missing, then opens it in editor,
+- `--filter-md`, `--behavior-md`, and `--behavior-submolt-md` open the default prompt file for that prompt name,
 - after editor launch, setup waits for explicit keypress confirmation before reading updated content,
 - per-flag status lines are printed,
 - prompt update statuses include resulting character counts when saved.
@@ -284,6 +307,8 @@ Validation checks include:
 - `FILTER_SYS.md` and `ACTION_SYS.md` exist in client root,
 - both `FILTER.md` and `BEHAVIOR.md` exist,
 - each required prompt file contains at least 10 non-whitespace characters.
+
+Planner prompt/policy prerequisites are evaluated at runtime per cycle: missing planner prompt/system-prompt/policy input yields a planner skip/failure event but does not abort queue heartbeat execution.
 
 Validation failures are surfaced early with actionable setup guidance.
 
@@ -395,11 +420,12 @@ Status payload includes mode, running/stopped timestamps, duration, cycle count,
 1. preflight: return if automation disabled or missing Moltbook API key.
 2. validate runtime LLM prerequisites.
 3. init DB + prune old un-acted items (`replied_item_id` null/empty) older than cutoff.
-4. conditional refill: if no unanalyzed items, run search and enqueue.
-5. same-cycle scan loop over oldest unanalyzed items.
-6. if search inserted zero new rows and no item was acted in the cycle, retry pending-action backlog oldest-first.
-7. stop only on first acted success or backlog exhaustion.
-8. persist `last_heartbeat_at` once at cycle end.
+4. planner-first phase: detect `BEHAVIOR_SUBMOLT.md` fingerprint changes, refresh/parse policy, run deterministic guards, and optionally execute planner create/post side effects.
+5. if planner acted, skip queue processing for that cycle (one-step-per-cycle behavior).
+6. otherwise, conditional refill: if no unanalyzed items, run search and enqueue.
+7. same-cycle scan loop over oldest unanalyzed items.
+8. if search inserted zero new rows and no item was acted in the cycle, retry pending-action backlog oldest-first.
+9. persist `last_heartbeat_at` once at cycle end, including cycles where planner fails.
 
 Per-item outcomes:
 
@@ -437,7 +463,10 @@ Prompt scope separation:
   - per-agent `FILTER.md` (relevance policy),
 - action stage composes:
   - `ACTION_SYS.md` (system-level response contract), and
-  - per-agent `BEHAVIOR.md` (reply/upvote behavior policy).
+  - per-agent `BEHAVIOR.md` (reply/upvote behavior policy),
+- submolt planner stage composes:
+  - `SUBMOLT_PLANNER_SYS.md` (system-level planner contract), and
+  - per-agent `BEHAVIOR_SUBMOLT.md` (cadence/topic/policy guidance).
 
 Analysis (`AnalysisDecision`):
 
@@ -449,6 +478,16 @@ Action (`ActionPlan`):
 
 - `reply_text: str`
 - `upvote: bool`
+- `promote_to_submolt: bool`
+- `promotion_topic: str | None`
+
+Submolt planner (`SubmoltPlannerPlan`):
+
+- `should_create_submolt: bool`
+- `submolt_name`, `display_name`, `description`, `allow_crypto`
+- `should_post`, `post_title`, `post_content`, `post_url`
+- `should_link_in_followup_reply`, `followup_reply_text`
+- `decision_rationale`
 
 Action prompt contract includes strict policy language:
 
@@ -526,7 +565,8 @@ Foreground runtime (`start`) can render heartbeat events through observer callba
 - search start/completion (including query + inserted post/comment counts),
 - analysis start/completion (including pass/fail + rationale),
 - action dry-run/live payload display with target URL,
-- action payload upvote metadata (`upvote_requested`, target type/id, and live API message when available).
+- action payload upvote metadata (`upvote_requested`, target type/id, and live API message when available),
+- planner evaluated/skipped/failed/acted events (with trigger and guard/failure reasons).
 
 Foreground event renderer includes:
 

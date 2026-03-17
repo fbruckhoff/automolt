@@ -20,5 +20,5 @@ This index catalogs every markdown document in `docs/design-docs/`.
 
 ## Subsystems
 
-`automation-system.md`: Full automation reference with command surface, runtime behavior, queue semantics, and LLM pipeline.
-`automation-runtime-design.md`: Design-focused abstraction of heartbeat orchestration and scheduler ownership.
+`automation-system.md`: Full automation reference with command surface, planner-first runtime behavior, queue semantics, and LLM pipeline. Verified 2026-03-17 (includes `automation setup` submolt-behavior prompt coverage).
+`automation-runtime-design.md`: Design-focused abstraction of heartbeat orchestration, planner staging, and scheduler ownership. Verified 2026-03-17.

@@ -14,7 +14,8 @@ The automation subsystem runs periodic heartbeat cycles for one target agent and
 
 - `SchedulerService` decides *when* to execute.
 - `AutomationService` decides *what* to execute.
-- `automation_store` persists queue state and status derivation.
+- `automation_store` persists queue state, planner policy fingerprints, and status derivation.
+- `automation_log_store` persists stage traces plus planner/runtime event history.
 - `scheduler_store` persists runtime locks/state and background scheduler integration.
 - `LLMExecutionService` + `OpenAILLMClient` execute stage-specific model calls with structured outputs.
 
@@ -23,9 +24,11 @@ The automation subsystem runs periodic heartbeat cycles for one target agent and
 A heartbeat cycle is modeled as:
 
 1. preflight validation (automation enabled, keys/config/prompt prerequisites),
-2. queue maintenance (initialize, prune, refill when needed),
-3. analysis/action scan over candidates,
-4. persistence of cycle completion timestamp and observable outcomes.
+2. planner-first policy refresh and deterministic guard evaluation (`BEHAVIOR_SUBMOLT.md` fingerprint + parsed policy),
+3. optional planner execution and side effects (`create_submolt`, optional `create_post`) with event persistence,
+4. queue maintenance (initialize, prune, refill when needed) only when planner did not act,
+5. analysis/action scan over candidates, including optional reactive planner escalation from action output,
+6. persistence of cycle completion timestamp and observable outcomes.
 
 This keeps command surfaces (`tick`, `start`, `monitor`, `status`) thin while centralizing execution semantics in service code.
 
@@ -42,8 +45,10 @@ Foreground and background runtime share due-time semantics:
 - Setup completeness is enforced before runtime side effects.
 - Read-only queue inspection (`automation list`) remains decoupled from provider auth prerequisites.
 - Action policy constraints (for example, no automated downvotes) are explicit service-level behavior.
+- Planner cadence/rate controls (interval, max/day, duplicate-name protection) are deterministic runtime guards, not model-only policy.
+- Planner parse/prompt failures are observable events and do not block heartbeat timestamp persistence.
 
 ## Verification status
 
-- **Verified:** 2026-03-10
-- **Verified against:** `services/automation_service.py`, `services/scheduler_service.py`, `persistence/automation_store.py`, `persistence/scheduler_store.py`, and `docs_old/AUTOMATION.md`.
+- **Verified:** 2026-03-17
+- **Verified against:** `services/automation_service.py`, `services/scheduler_service.py`, `services/llm_execution_service.py`, `persistence/automation_store.py`, `persistence/automation_log_store.py`, `persistence/scheduler_store.py`, and `commands/automation/reload_command.py`.

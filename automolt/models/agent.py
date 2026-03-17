@@ -20,6 +20,7 @@ class AutomationStage(str, Enum):
 
     ANALYSIS = "analysis"
     ACTION = "action"
+    SUBMOLT_PLANNER = "submolt_planner"
 
 
 class Agent(BaseModel):
@@ -72,6 +73,7 @@ class AutomationLLM(BaseModel):
 
     analysis: StageLLMConfig = Field(default_factory=StageLLMConfig)
     action: StageLLMConfig = Field(default_factory=StageLLMConfig)
+    submolt_planner: StageLLMConfig = Field(default_factory=StageLLMConfig)
 
 
 class Automation(BaseModel):

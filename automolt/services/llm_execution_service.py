@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from automolt.models.agent import AgentConfig, AutomationStage, StageLLMConfig
-from automolt.models.llm import ActionPlan, AnalysisDecision
+from automolt.models.llm import ActionPlan, AnalysisDecision, SubmoltPlannerPlan
 from automolt.models.llm_provider import LLMProvider, LLMProviderConfig
 from automolt.services.base_llm_client import LLMClientError
 from automolt.services.llm_provider_service import LLMProviderService
@@ -16,7 +16,7 @@ from automolt.services.openai_llm_client import OpenAILLMClient, StructuredCompl
 class StageExecutionResult:
     """Parsed stage output together with the raw provider response text."""
 
-    parsed_output: AnalysisDecision | ActionPlan
+    parsed_output: AnalysisDecision | ActionPlan | SubmoltPlannerPlan
     raw_response: str
 
 
@@ -61,6 +61,23 @@ class LLMExecutionService:
             user_prompt=user_prompt,
         )
 
+    def plan_submolt(
+        self,
+        *,
+        config: AgentConfig,
+        provider_config: LLMProviderConfig,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> StageExecutionResult:
+        """Run the submolt-planner stage call."""
+        return self._run_stage(
+            stage=AutomationStage.SUBMOLT_PLANNER,
+            stage_config=config.automation.llm.submolt_planner,
+            provider_config=provider_config,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
+
     def _run_stage(
         self,
         *,
@@ -98,7 +115,17 @@ class LLMExecutionService:
             )
             return self._to_stage_execution_result(completion_result)
 
-        completion_result = self._openai_client.generate_action_with_trace(
+        if stage == AutomationStage.ACTION:
+            completion_result = self._openai_client.generate_action_with_trace(
+                model=stage_config.model,
+                api_key=api_key,
+                max_output_tokens=max_output_tokens,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            )
+            return self._to_stage_execution_result(completion_result)
+
+        completion_result = self._openai_client.generate_submolt_plan_with_trace(
             model=stage_config.model,
             api_key=api_key,
             max_output_tokens=max_output_tokens,

@@ -11,6 +11,7 @@ from pathlib import Path
 SYSTEM_PROMPT_FILENAMES: dict[str, str] = {
     "filter": "FILTER_SYS.md",
     "action": "ACTION_SYS.md",
+    "submolt_planner": "SUBMOLT_PLANNER_SYS.md",
 }
 
 DEFAULT_SYSTEM_PROMPTS: dict[str, str] = {
@@ -19,9 +20,18 @@ DEFAULT_SYSTEM_PROMPTS: dict[str, str] = {
     ),
     "action": (
         "You are an action planner for social replies. Return ONLY valid minified JSON with keys: "
-        "reply_text (string), upvote (boolean). Set upvote=true only when you want to upvote "
-        "the same item you are replying to. Never request downvotes. Do NOT use markdown fences "
-        "(```) and do not include any prose."
+        "reply_text (string), upvote (boolean), promote_to_submolt (boolean), promotion_topic (string|null). "
+        "Set upvote=true only when you want to upvote the same item you are replying to. "
+        "Set promote_to_submolt=true only when this item should trigger reactive submolt planning. "
+        "Never request downvotes. Do NOT use markdown fences (```) and do not include any prose."
+    ),
+    "submolt_planner": (
+        "You are a planner for autonomous submolt operations. Return ONLY valid minified JSON with keys: "
+        "should_create_submolt (boolean), submolt_name (string|null), display_name (string|null), "
+        "description (string|null), allow_crypto (boolean), should_post (boolean), "
+        "post_title (string|null), post_content (string|null), post_url (string|null), "
+        "should_link_in_followup_reply (boolean), followup_reply_text (string|null), "
+        "decision_rationale (string). Do NOT use markdown fences (```) and do not include any prose."
     ),
 }
 

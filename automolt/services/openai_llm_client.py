@@ -19,7 +19,7 @@ from openai import (
 )
 from pydantic import ValidationError
 
-from automolt.models.llm import ActionPlan, AnalysisDecision
+from automolt.models.llm import ActionPlan, AnalysisDecision, SubmoltPlannerPlan
 from automolt.services.base_llm_client import LLMClientError
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,7 @@ DEFAULT_TIMEOUT_SECONDS = 30.0
 class StructuredCompletionResult:
     """Parsed stage output plus raw provider response content."""
 
-    parsed_output: AnalysisDecision | ActionPlan
+    parsed_output: AnalysisDecision | ActionPlan | SubmoltPlannerPlan
     raw_response: str
 
 
@@ -117,6 +117,44 @@ class OpenAILLMClient:
             response_model=ActionPlan,
         )
 
+    def generate_submolt_plan(
+        self,
+        *,
+        model: str,
+        api_key: str,
+        max_output_tokens: int,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> SubmoltPlannerPlan:
+        """Run submolt-planner stage and return parsed plan only."""
+        result = self.generate_submolt_plan_with_trace(
+            model=model,
+            api_key=api_key,
+            max_output_tokens=max_output_tokens,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
+        return result.parsed_output
+
+    def generate_submolt_plan_with_trace(
+        self,
+        *,
+        model: str,
+        api_key: str,
+        max_output_tokens: int,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> StructuredCompletionResult:
+        """Run submolt-planner stage and return response trace."""
+        return self._request_structured_completion(
+            model=model,
+            api_key=api_key,
+            max_output_tokens=max_output_tokens,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            response_model=SubmoltPlannerPlan,
+        )
+
     def _request_structured_completion(
         self,
         *,
@@ -125,7 +163,7 @@ class OpenAILLMClient:
         max_output_tokens: int,
         system_prompt: str,
         user_prompt: str,
-        response_model: type[AnalysisDecision] | type[ActionPlan],
+        response_model: type[AnalysisDecision] | type[ActionPlan] | type[SubmoltPlannerPlan],
     ) -> StructuredCompletionResult:
         """Request a strict structured response and validate with Pydantic."""
         client = self._create_openai_client(api_key)
@@ -356,8 +394,8 @@ class OpenAILLMClient:
     def _parse_json_content(
         self,
         content: str,
-        response_model: type[AnalysisDecision] | type[ActionPlan],
-    ) -> AnalysisDecision | ActionPlan:
+        response_model: type[AnalysisDecision] | type[ActionPlan] | type[SubmoltPlannerPlan],
+    ) -> AnalysisDecision | ActionPlan | SubmoltPlannerPlan:
         """Parse JSON text and validate against a Pydantic model."""
         parsed_data = json.loads(content)
         return response_model.model_validate(parsed_data)

@@ -126,6 +126,24 @@ Load `BEHAVIOR_SUBMOLT.md` only when submolt planner is invoked.
 
 This avoids paying submolt-policy tokens on every queue item.
 
+## Cadence Change UX: Immediate Refresh Strategy
+
+The current UX risk is stale cadence behavior after operators edit `BEHAVIOR_SUBMOLT.md` (for example, changing from every 24h to every 2h). The most pragmatic and effective approach is to combine lightweight automatic change detection with an explicit manual reload command.
+
+Recommended mechanism:
+
+1. Track a persisted behavior-file fingerprint using `os.stat` metadata (`st_mtime_ns` + `st_size`) for `BEHAVIOR_SUBMOLT.md`.
+2. On every automation tick, compare the current fingerprint to the last parsed fingerprint.
+3. If changed, re-parse submolt cadence/policy immediately before guard evaluation.
+4. Recompute due-state immediately using the new cadence against persisted event history (`last_submolt_created_at_utc`), so shortened intervals can trigger without waiting for the old interval window.
+5. Add `automolt automation reload --handle <handle>` to force refresh when operators want immediate deterministic control.
+
+Why this is the pragmatic default:
+
+- `stat` checks are cheap and safe to run every tick.
+- No file-watcher daemon complexity or platform-specific edge cases.
+- Manual reload provides deterministic operator control even in rare timestamp-granularity/editor edge cases.
+
 ## If Single-File Policy Is Required
 
 If you must keep one file, parse a compact machine-readable frontmatter block and only inject the relevant section:
@@ -166,6 +184,7 @@ This supports your "first create submolt, then point to it" scenario without blo
 Recommended enforcement hierarchy:
 
 1. Hard runtime guards (deterministic):
+   - behavior policy refresh on file fingerprint change (or explicit reload),
    - minimum interval not elapsed => skip planner call,
    - max creations/day reached => skip,
    - duplicate submolt name collision handling.
@@ -188,6 +207,8 @@ Phase 1 (low risk):
 
 - Add deterministic cadence gate + persistence timestamps for submolt events.
 - Add planner stage + `BEHAVIOR_SUBMOLT.md` support.
+- Add per-tick `BEHAVIOR_SUBMOLT.md` fingerprint checks with immediate re-parse/recompute.
+- Add explicit `automolt automation reload` command to force behavior refresh.
 - Execute create+post autonomously only from scheduled trigger.
 
 Phase 2:
@@ -205,7 +226,36 @@ Phase 3:
 - Do not put full `create_submolt` payload fields into the always-on action schema.
 - Add a separate submolt planner stage and optional separate behavior prompt file.
 - Inject explicit time metadata (`current_utc`, `last_submolt_created_at_utc`, elapsed hours) for correct interval reasoning.
+- Detect `BEHAVIOR_SUBMOLT.md` changes per tick via persisted file fingerprint and re-parse immediately.
+- Provide `automolt automation reload` as a manual override for immediate config refresh.
 - Keep hard scheduling/rate guards deterministic in runtime code.
 - Support reactive "create then reference" via a compact escalation flag from normal action output.
 
 This gives autonomous submolt creation/posting with strong token efficiency and clear architecture boundaries.
+
+# Decision
+
+Verdict: **approve the separate planner architecture**, and implement it as a staged rollout that keeps the current analysis/action hot path stable.
+
+## Final implementation decision
+
+1. Keep the existing `ActionPlan(reply_text, upvote)` as the default queue-item contract.
+2. Add a new conditional `submolt_planner` stage that runs outside the per-item loop.
+3. Introduce deterministic runtime guards first (interval + max/day + duplicate-name prevention) before any planner call.
+4. Add dedicated submolt automation persistence (event history with timestamps and status) to support idempotence and scheduling context.
+5. Split prompt domains by adding `BEHAVIOR_SUBMOLT.md`, loaded only for planner invocations.
+6. Add per-tick behavior file change detection (`st_mtime_ns` + `st_size`) and immediate cadence refresh.
+7. Add `automolt automation reload` to force re-parse and recompute due-state on demand.
+
+## Scope by phase
+
+- **Phase 1 (implementation target now):** scheduled proactive creation/posting only, backed by deterministic guards and submolt event persistence.
+- **Phase 2:** reactive escalation path from queue-item action output (compact escalation fields only).
+- **Phase 3:** richer policy controls and runtime status/monitor surfacing for submolt automation events.
+
+## Why this is final
+
+- It matches current architecture boundaries (`SchedulerService` owns when; `AutomationService` owns what).
+- It preserves token efficiency on the highest-frequency path.
+- It reuses existing `SubmoltService`, `PostService`, and verification behavior without overloading current queue semantics.
+- It minimizes regression risk by introducing autonomy through an additive, gated path rather than changing the existing action contract for every item.

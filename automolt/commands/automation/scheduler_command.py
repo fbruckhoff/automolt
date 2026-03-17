@@ -63,6 +63,39 @@ class _HeartbeatMonitorRenderer:
 
         if event.event_type == HeartbeatEventType.ACTION_POSTED:
             self._render_action_payload(event, title="Posted automation comment", style="green")
+            return
+
+        if event.event_type == HeartbeatEventType.PLANNER_EVALUATED:
+            self._console.print(
+                "[cyan]Planner evaluated[/cyan] "
+                f"trigger={event.planner_trigger or 'unknown'} "
+                f"reason={event.planner_reason or 'n/a'}"
+            )
+            return
+
+        if event.event_type == HeartbeatEventType.PLANNER_SKIPPED:
+            self._console.print(
+                "[yellow]Planner skipped[/yellow] "
+                f"trigger={event.planner_trigger or 'unknown'} "
+                f"reason={event.planner_reason or 'n/a'}"
+            )
+            return
+
+        if event.event_type == HeartbeatEventType.PLANNER_FAILED:
+            self._console.print(
+                "[red]Planner failed[/red] "
+                f"trigger={event.planner_trigger or 'unknown'} "
+                f"reason={event.planner_reason or 'n/a'}"
+            )
+            return
+
+        if event.event_type == HeartbeatEventType.PLANNER_ACTED:
+            self._console.print(
+                "[green]Planner acted[/green] "
+                f"trigger={event.planner_trigger or 'unknown'} "
+                f"submolt={event.planner_submolt_name or 'unknown'} "
+                f"post_id={event.planner_post_id or 'n/a'}"
+            )
 
     def close(self) -> None:
         """Stop any active spinner statuses."""

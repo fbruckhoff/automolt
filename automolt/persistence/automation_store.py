@@ -25,6 +25,16 @@ CREATE TABLE IF NOT EXISTS items (
 )
 """
 
+CREATE_RUNTIME_STATE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS runtime_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    behavior_submolt_mtime_ns INTEGER,
+    behavior_submolt_size INTEGER,
+    behavior_submolt_policy_json TEXT,
+    behavior_submolt_loaded_at_utc TEXT
+)
+"""
+
 POST_ID_COLUMN_NAME = "post_id"
 RELEVANCE_RATIONALE_COLUMN_NAME = "relevance_rationale"
 
@@ -36,6 +46,16 @@ class InsertItemsResult:
     total: int
     posts: int
     comments: int
+
+
+@dataclass(frozen=True)
+class BehaviorSubmoltRuntimeState:
+    """Persisted runtime metadata for BEHAVIOR_SUBMOLT policy state."""
+
+    behavior_submolt_mtime_ns: int | None = None
+    behavior_submolt_size: int | None = None
+    behavior_submolt_policy_json: str | None = None
+    behavior_submolt_loaded_at_utc: str | None = None
 
 
 CREATE_INDEX_SQL = """
@@ -74,6 +94,7 @@ def init_db(base_path: Path, handle: str) -> None:
     with sqlite3.connect(db_path) as conn:
         conn.execute(CREATE_TABLE_SQL)
         _ensure_items_table_schema(conn)
+        conn.execute(CREATE_RUNTIME_STATE_TABLE_SQL)
         conn.execute(CREATE_INDEX_SQL)
 
 
@@ -142,6 +163,58 @@ def list_pending_action_items_oldest(base_path: Path, handle: str) -> list[Queue
         rows = conn.execute(f"SELECT * FROM items WHERE analyzed = 1 AND is_relevant = 1 AND {UNREPLIED_ITEM_WHERE_CLAUSE} ORDER BY created_at ASC").fetchall()
 
     return [_row_to_queue_item(row) for row in rows]
+
+
+def load_behavior_submolt_runtime_state(base_path: Path, handle: str) -> BehaviorSubmoltRuntimeState:
+    """Load persisted BEHAVIOR_SUBMOLT runtime metadata for one agent."""
+    db_path = get_db_path(base_path, handle)
+    if not db_path.exists():
+        return BehaviorSubmoltRuntimeState()
+
+    init_db(base_path, handle)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT behavior_submolt_mtime_ns, behavior_submolt_size, behavior_submolt_policy_json, behavior_submolt_loaded_at_utc "
+            "FROM runtime_state WHERE id = 1"
+        ).fetchone()
+
+    if row is None:
+        return BehaviorSubmoltRuntimeState()
+
+    return BehaviorSubmoltRuntimeState(
+        behavior_submolt_mtime_ns=row["behavior_submolt_mtime_ns"],
+        behavior_submolt_size=row["behavior_submolt_size"],
+        behavior_submolt_policy_json=row["behavior_submolt_policy_json"],
+        behavior_submolt_loaded_at_utc=row["behavior_submolt_loaded_at_utc"],
+    )
+
+
+def save_behavior_submolt_runtime_state(
+    base_path: Path,
+    handle: str,
+    state: BehaviorSubmoltRuntimeState,
+) -> None:
+    """Persist BEHAVIOR_SUBMOLT runtime metadata for one agent."""
+    init_db(base_path, handle)
+    db_path = get_db_path(base_path, handle)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO runtime_state (id, behavior_submolt_mtime_ns, behavior_submolt_size, behavior_submolt_policy_json, behavior_submolt_loaded_at_utc) "
+            "VALUES (1, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "behavior_submolt_mtime_ns = excluded.behavior_submolt_mtime_ns, "
+            "behavior_submolt_size = excluded.behavior_submolt_size, "
+            "behavior_submolt_policy_json = excluded.behavior_submolt_policy_json, "
+            "behavior_submolt_loaded_at_utc = excluded.behavior_submolt_loaded_at_utc",
+            (
+                state.behavior_submolt_mtime_ns,
+                state.behavior_submolt_size,
+                state.behavior_submolt_policy_json,
+                state.behavior_submolt_loaded_at_utc,
+            ),
+        )
 
 
 def insert_items(base_path: Path, handle: str, items: list[QueueItem]) -> InsertItemsResult:
