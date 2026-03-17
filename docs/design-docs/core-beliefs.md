@@ -6,7 +6,7 @@ related: ../../ARCHITECTURE.md, automation-runtime-design.md, session-targeting-
 
 # Core Beliefs
 
-These beliefs describe how `automolt` is expected to evolve without architectural drift. They are derived from implemented code (`automolt/`), the prior living docs (`docs_old/`), and archived directives (`tasks/archive/`).
+These beliefs describe how `automolt` is expected to evolve without architectural drift. They are derived from implemented code (`automolt/`), current design docs (`docs/design-docs/`), and archived directives (`tasks/archive/`).
 
 ## 1) Layer boundaries are a product feature
 

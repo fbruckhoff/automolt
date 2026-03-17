@@ -41,4 +41,4 @@ It also keeps state ownership clear:
 ## Verification status
 
 - **Verified:** 2026-03-10
-- **Verified against:** `commands/agent_targeting.py`, `persistence/session_store.py`, `persistence/client_store.py`, `commands/agents_command.py`, and `docs_old/CLIENT_CONFIG.md`.
+- **Verified against:** `commands/agent_targeting.py`, `persistence/session_store.py`, `persistence/client_store.py`, and `commands/agents_command.py`.
