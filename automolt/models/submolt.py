@@ -9,7 +9,7 @@ class SubmoltCreateResponse(BaseModel):
     name: str = Field(min_length=1)
     display_name: str = Field(min_length=1)
     description: str | None = None
-    owner: str
+    owner: str | None = None
     subscriber_count: int = 0
     post_count: int = 0
     created_at: str

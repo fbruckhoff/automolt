@@ -46,6 +46,10 @@ DEFAULT_SUBMOLT_CREATE_INTERVAL_HOURS = 24
 DEFAULT_SUBMOLT_MAX_CREATIONS_PER_DAY = 1
 MAX_SUBMOLT_POLICY_TOPIC_LENGTH = 200
 MAX_SUBMOLT_SOURCE_SUMMARY_LENGTH = 240
+SUBMOLT_NAME_MIN_LENGTH = 2
+SUBMOLT_NAME_MAX_LENGTH = 30
+SUBMOLT_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+RETRYABLE_SUBMOLT_ERROR_TOKENS = ("bad request", "already", "exists", "taken", "duplicate")
 
 
 class ItemProcessingOutcome(str, Enum):
@@ -979,15 +983,15 @@ class AutomationService:
             return SubmoltPlannerEvaluationResult(acted=True, status="dry-run", reason="dry-run")
 
         display_name = planner_plan.display_name or normalized_submolt_name.replace("-", " ").title()
-        description = planner_plan.description
+        description = self._resolve_planned_submolt_description(planner_plan.description, display_name)
 
         created_submolt_name: str | None = None
         created_post_id: str | None = None
         try:
-            submolt_response = self._submolt_service.create_submolt(
-                config.agent.api_key,
-                normalized_submolt_name,
-                display_name,
+            submolt_response = self._create_planned_submolt_with_retry(
+                api_key=config.agent.api_key,
+                submolt_name=normalized_submolt_name,
+                display_name=display_name,
                 description=description,
                 allow_crypto=planner_plan.allow_crypto,
             )
@@ -1002,7 +1006,7 @@ class AutomationService:
                 source_item_id=planner_context.source_item_id,
             )
         except (MoltbookAPIError, ValueError) as exc:
-            reason = f"create-submolt-failed: {exc}"
+            reason = self._format_submolt_create_failure_reason(exc)
             automation_log_store.write_automation_event(
                 self._base_path,
                 handle,
@@ -1134,14 +1138,90 @@ class AutomationService:
         """Normalize planner-provided submolt names to API-safe slug format."""
         if raw_name is None:
             return None
-        normalized = raw_name.strip().lower()
-        normalized = re.sub(r"[^a-z0-9-]+", "-", normalized)
-        normalized = re.sub(r"-{2,}", "-", normalized).strip("-")
+        normalized = self._normalize_submolt_slug(raw_name)
         if name_prefix:
-            prefix = re.sub(r"[^a-z0-9-]+", "-", name_prefix.strip().lower()).strip("-")
+            prefix = self._normalize_submolt_slug(name_prefix)
             if prefix and not normalized.startswith(f"{prefix}-"):
-                normalized = f"{prefix}-{normalized}"
+                normalized = f"{prefix}-{normalized}" if normalized else prefix
+
+        normalized = normalized[:SUBMOLT_NAME_MAX_LENGTH].strip("-")
+        if len(normalized) < SUBMOLT_NAME_MIN_LENGTH:
+            return None
+        if not SUBMOLT_NAME_PATTERN.match(normalized):
+            return None
+
         return normalized or None
+
+    def _normalize_submolt_slug(self, value: str) -> str:
+        normalized = value.strip().lower()
+        normalized = re.sub(r"[^a-z0-9-]+", "-", normalized)
+        return re.sub(r"-{2,}", "-", normalized).strip("-")
+
+    def _resolve_planned_submolt_description(self, raw_description: str | None, display_name: str) -> str:
+        if raw_description is not None and raw_description.strip():
+            return raw_description.strip()
+        return f"A community for {display_name} discussions."
+
+    def _create_planned_submolt_with_retry(
+        self,
+        *,
+        api_key: str,
+        submolt_name: str,
+        display_name: str,
+        description: str,
+        allow_crypto: bool,
+    ):
+        last_error: MoltbookAPIError | None = None
+        attempted_names: set[str] = set()
+        name_candidates = (submolt_name, self._build_retry_submolt_name(submolt_name))
+
+        for candidate_name in name_candidates:
+            if not candidate_name or candidate_name in attempted_names:
+                continue
+            attempted_names.add(candidate_name)
+
+            try:
+                return self._submolt_service.create_submolt(
+                    api_key,
+                    candidate_name,
+                    display_name,
+                    description=description,
+                    allow_crypto=allow_crypto,
+                )
+            except MoltbookAPIError as exc:
+                last_error = exc
+                if candidate_name != submolt_name or not self._is_retryable_submolt_create_error(exc):
+                    raise
+
+        if last_error is not None:
+            raise last_error
+        raise MoltbookAPIError(message="Failed to create submolt.")
+
+    def _build_retry_submolt_name(self, base_name: str) -> str:
+        suffix = datetime.now(timezone.utc).strftime("%m%d%H%M")
+        max_base_length = SUBMOLT_NAME_MAX_LENGTH - len(suffix) - 1
+        trimmed_base = base_name[:max_base_length].strip("-")
+        if len(trimmed_base) < SUBMOLT_NAME_MIN_LENGTH:
+            trimmed_base = "community"
+        return f"{trimmed_base}-{suffix}"
+
+    def _is_retryable_submolt_create_error(self, error: MoltbookAPIError) -> bool:
+        if error.status_code in {400, 409}:
+            return True
+
+        message = error.message.strip().lower()
+        return any(token in message for token in RETRYABLE_SUBMOLT_ERROR_TOKENS)
+
+    def _format_submolt_create_failure_reason(self, error: MoltbookAPIError | ValueError) -> str:
+        if isinstance(error, ValueError):
+            return f"create-submolt-failed: {error}"
+
+        details = error.message
+        if error.hint:
+            details = f"{details} (hint: {error.hint})"
+        if error.status_code is not None:
+            details = f"{details} [status={error.status_code}]"
+        return f"create-submolt-failed: {details}"
 
     def _process_pending_action_backlog(
         self,
