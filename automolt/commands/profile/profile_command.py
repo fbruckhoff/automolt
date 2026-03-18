@@ -1,7 +1,7 @@
 """Command handler for the 'profile' command group.
 
 Displays the active agent's profile information, checks verification
-status, and provides the set-avatar and update-description subcommands.
+status, and provides profile update subcommands.
 """
 
 from datetime import datetime
@@ -116,12 +116,6 @@ def _build_profile_text(agent: "Agent") -> str:
     profile_url = f"https://www.moltbook.com/u/{agent.handle}"
     profile_text = f"[bold]Handle:[/bold] {agent.handle}\n[bold]Description:[/bold] {agent.description}\n[bold]Profile:[/bold] [link={profile_url}]{profile_url}[/link]\n"
 
-    # Avatar info
-    if agent.avatar_url:
-        profile_text += f"[bold]Avatar:[/bold] [link={agent.avatar_url}]{agent.avatar_url}[/link]\n"
-    else:
-        profile_text += f"[bold]Avatar:[/bold] [dim]Not set. Run '[bold]{CLI_NAME} profile set-avatar[/bold]' to upload one.[/dim]\n"
-
     profile_text += f"[bold]Verification Status:[/bold] {status_display}"
 
     # Twitter handle used for verification
@@ -202,101 +196,6 @@ def profile(ctx: click.Context, handle: str | None) -> None:
             border_style="cyan" if is_claimed else "yellow",
         )
     )
-
-
-def _display_avatar_constraints(console: Console) -> None:
-    """Display avatar upload constraints to the user.
-
-    Args:
-        console: Rich console for output
-    """
-    console.print()
-    console.print("[bold]Avatar Upload Constraints:[/bold]")
-    console.print("  - Max size: 500 KB")
-    console.print("  - Formats: JPEG, PNG, GIF, WebP")
-    console.print("  - Recommended: Square image (e.g., 512x512)")
-    console.print()
-
-
-def _process_file_path(file_path: str) -> str:
-    """Process and normalize the file path input.
-
-    Args:
-        file_path: Raw file path input from user
-
-    Returns:
-        Normalized absolute file path
-    """
-    # Handle escaped spaces and other shell escapes
-    file_path = file_path.replace("\\ ", " ")
-    # Expand user home directory shorthand
-    return str(Path(file_path).expanduser().resolve())
-
-
-def _handle_avatar_upload_errors(exc: Exception, console: Console) -> None:
-    """Handle errors during avatar upload.
-
-    Args:
-        exc: The exception that occurred
-        console: Rich console for output
-
-    Raises:
-        SystemExit: Always exits after handling error
-    """
-    if isinstance(exc, FileNotFoundError):
-        console.print(f"[red]{exc}[/red]")
-    elif isinstance(exc, ValueError):
-        console.print(f"[red]{exc}[/red]")
-    elif isinstance(exc, MoltbookAPIError):
-        console.print(f"[bold red]Failed to upload avatar:[/bold red] {exc.message}")
-        if exc.hint:
-            console.print(f"[dim]Hint: {exc.hint}[/dim]")
-    else:
-        console.print(f"[red]Unexpected error: {exc}[/red]")
-
-    raise click.ClickException("Avatar upload failed")
-
-
-@profile.command("set-avatar")
-@click.option(
-    "--handle",
-    type=str,
-    default=None,
-    help="Agent handle to update. Defaults to session active agent.",
-)
-@click.pass_context
-def set_avatar(ctx: click.Context, handle: str | None) -> None:
-    """Upload an avatar image for a target agent."""
-    console: Console = ctx.obj["console"]
-    base_path: Path = ctx.obj["base_path"]
-    agent_service: AgentService = ctx.obj["agent_service"]
-
-    inherited_handle = _resolve_parent_profile_handle(ctx)
-    effective_handle = handle if handle is not None else inherited_handle
-
-    # Resolve target agent
-    active_handle = _resolve_target_handle(base_path, console, ctx, effective_handle)
-    if not active_handle:
-        return
-
-    # Display constraints
-    _display_avatar_constraints(console)
-
-    # Prompt for file path
-    file_path = click.prompt("Enter the path to your avatar image").strip()
-    file_path = _process_file_path(file_path)
-
-    # Upload avatar
-    console.print()
-    with console.status("Uploading avatar..."):
-        try:
-            config = agent_service.set_avatar(active_handle, file_path)
-        except Exception as exc:
-            _handle_avatar_upload_errors(exc, console)
-
-    console.print(f"[green]Avatar uploaded for '{config.agent.handle}'.[/green]")
-    if config.agent.avatar_url:
-        console.print(f"[dim]Avatar URL: {config.agent.avatar_url}[/dim]")
 
 
 profile.add_command(update_description)

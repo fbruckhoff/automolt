@@ -44,7 +44,6 @@ class Agent(BaseModel):
 
     # Fields populated from the Moltbook API profile response
     x_handle: str | None = None
-    avatar_url: str | None = None
     karma: int | None = None
     follower_count: int | None = None
     following_count: int | None = None

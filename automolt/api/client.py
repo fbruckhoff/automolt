@@ -1,6 +1,5 @@
 """HTTP client for communicating with the Moltbook API."""
 
-from pathlib import PurePath
 from typing import Any
 
 import httpx
@@ -61,7 +60,7 @@ class MoltbookClient:
             )
 
         if not response.is_success:
-            error_msg = data.get("error", f"HTTP {response.status_code}")
+            error_msg = data.get("error") or data.get("message") or f"HTTP {response.status_code}"
             hint = data.get("hint")
             raise MoltbookAPIError(message=error_msg, hint=hint, status_code=response.status_code)
 
@@ -158,27 +157,6 @@ class MoltbookClient:
         """
         try:
             response = self._http.get("/agents/me", headers=self._auth_headers(api_key))
-            return self._handle_response(response)
-        except httpx.HTTPError as exc:
-            raise self._handle_http_error(exc) from exc
-
-    def upload_avatar(self, api_key: str, file_path: str) -> dict[str, Any]:
-        """Upload an avatar image via POST /agents/me/avatar.
-
-        Args:
-            api_key: The agent's API key for authentication.
-            file_path: Absolute path to the image file.
-
-        Returns:
-            The raw JSON response dict containing the avatar_url.
-
-        Raises:
-            MoltbookAPIError: If the upload fails.
-        """
-        try:
-            with open(file_path, "rb") as f:
-                files = {"file": (PurePath(file_path).name, f)}
-                response = self._http.post("/agents/me/avatar", headers=self._auth_headers(api_key), files=files)
             return self._handle_response(response)
         except httpx.HTTPError as exc:
             raise self._handle_http_error(exc) from exc

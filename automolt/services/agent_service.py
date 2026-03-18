@@ -4,7 +4,6 @@ Handles signup flow: checking handle availability, registering agents
 via the Moltbook API, and persisting agent configuration locally.
 """
 
-import os
 from pathlib import Path
 
 from automolt.api.client import MoltbookAPIError, MoltbookClient
@@ -14,10 +13,6 @@ from automolt.persistence.agent_store import (
     load_agent_config,
     save_agent_config,
 )
-
-AVATAR_MAX_SIZE_BYTES = 500 * 1024  # 500 KB
-AVATAR_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
-
 
 class AgentService:
     """Service for agent-related operations like signup."""
@@ -135,8 +130,8 @@ class AgentService:
     def get_profile(self, handle: str) -> AgentConfig:
         """Fetch the full profile from the API and safe-merge into local config.
 
-        Extracts x_handle from the owner object, avatar_url, karma,
-        follower/following counts, is_active, created_at, and last_active.
+        Extracts x_handle from the owner object, karma, follower/following
+        counts, is_active, created_at, and last_active.
         Preserves all existing local fields (api_key, claim_url, etc.).
 
         Args:
@@ -166,13 +161,10 @@ class AgentService:
             config.agent.verification_status = VerificationStatus.PENDING
 
         # Safe merge: update only API-sourced fields when the API provides a
-        # non-None value, preserving locally stored data (e.g. avatar_url set
-        # by set_avatar) that the API may not echo back.
+        # non-None value.
         owner = agent_data.get("owner") or {}
         if owner.get("x_handle") is not None:
             config.agent.x_handle = owner["x_handle"]
-        if agent_data.get("avatar_url"):
-            config.agent.avatar_url = agent_data["avatar_url"]
         if agent_data.get("karma") is not None:
             config.agent.karma = agent_data["karma"]
         if agent_data.get("follower_count") is not None:
@@ -190,53 +182,6 @@ class AgentService:
         if agent_data.get("description"):
             config.agent.description = agent_data["description"]
 
-        save_agent_config(self._base_path, config)
-
-        return config
-
-    def set_avatar(self, handle: str, file_path: str) -> AgentConfig:
-        """Upload an avatar and safe-merge the avatar_url into local config.
-
-        Validates file constraints before uploading.
-
-        Args:
-            handle: The agent's handle.
-            file_path: Absolute path to the image file.
-
-        Returns:
-            The updated AgentConfig with the new avatar_url.
-
-        Raises:
-            MoltbookAPIError: If the API upload fails or agent has no API key.
-            FileNotFoundError: If the agent config or image file does not exist.
-            ValueError: If the file exceeds size or format constraints.
-        """
-        config = load_agent_config(self._base_path, handle)
-
-        if not config.agent.api_key:
-            raise MoltbookAPIError(message="Agent must be claimed before setting an avatar.")
-
-        # Validate file exists
-        if not os.path.isfile(file_path):
-            raise FileNotFoundError(f"File not found: {file_path}")
-
-        # Validate file extension
-        ext = os.path.splitext(file_path)[1].lower()
-        if ext not in AVATAR_ALLOWED_EXTENSIONS:
-            allowed = ", ".join(sorted(AVATAR_ALLOWED_EXTENSIONS))
-            raise ValueError(f"Unsupported file format '{ext}'. Allowed: {allowed}")
-
-        # Validate file size
-        file_size = os.path.getsize(file_path)
-        if file_size > AVATAR_MAX_SIZE_BYTES:
-            max_kb = AVATAR_MAX_SIZE_BYTES // 1024
-            actual_kb = file_size // 1024
-            raise ValueError(f"File too large ({actual_kb} KB). Maximum: {max_kb} KB.")
-
-        data = self._api.upload_avatar(config.agent.api_key, file_path)
-
-        # Safe merge: only update avatar_url
-        config.agent.avatar_url = data.get("avatar_url")
         save_agent_config(self._base_path, config)
 
         return config
