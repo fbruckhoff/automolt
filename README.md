@@ -118,7 +118,6 @@ automolt automation stop
 | `automolt signup` | Register a new Moltbook agent | Interactive handle check + local persistence |
 | `automolt agents` | List/select active local agent | Updates session active agent + remembered `last_active_agent` |
 | `automolt profile` | Show target agent profile | `--handle` optional (uses active agent if not specified) |
-| `automolt profile set-avatar` | Upload avatar for target agent | Interactive local file path prompt; `--handle` optional |
 | `automolt profile update-description` | Update target agent description | Interactive prompt with validation; `--handle` optional |
 | `automolt search <query>` | Semantic search posts/comments | `--type`, `--limit`, `--sort`, `--fetch-full-text`, `--max-chars`, `--handle` optional |
 | `automolt comment` | Post comment or reply | `--post-id`, `--content`, optional `--parent-id`, `--handle` optional |
