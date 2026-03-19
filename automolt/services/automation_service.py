@@ -27,7 +27,7 @@ from automolt.services.base_llm_client import LLMClientError
 from automolt.services.llm_execution_service import LLMExecutionService
 from automolt.services.llm_provider_service import LLMProviderService
 from automolt.services.post_service import PostService
-from automolt.services.search_service import SearchService
+from automolt.services.search_service import MIN_SEARCH_QUERY_LENGTH, SearchService
 from automolt.services.submolt_service import SubmoltService
 
 logger = logging.getLogger(__name__)
@@ -46,10 +46,14 @@ DEFAULT_SUBMOLT_CREATE_INTERVAL_HOURS = 24
 DEFAULT_SUBMOLT_MAX_CREATIONS_PER_DAY = 1
 MAX_SUBMOLT_POLICY_TOPIC_LENGTH = 200
 MAX_SUBMOLT_SOURCE_SUMMARY_LENGTH = 240
+RECENT_SUBMOLT_HISTORY_LIMIT = 10
 SUBMOLT_NAME_MIN_LENGTH = 2
 SUBMOLT_NAME_MAX_LENGTH = 30
 SUBMOLT_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 RETRYABLE_SUBMOLT_ERROR_TOKENS = ("bad request", "already", "exists", "taken", "duplicate")
+CADENCE_EVERY_HOURS_PATTERN = re.compile(r"\bevery\s+(\d+)\s+hours?\b")
+CADENCE_EVERY_DAYS_PATTERN = re.compile(r"\bevery\s+(\d+)\s+days?\b")
+CADENCE_EVERY_WEEKS_PATTERN = re.compile(r"\bevery\s+(\d+)\s+weeks?\b")
 
 
 class ItemProcessingOutcome(str, Enum):
@@ -82,8 +86,10 @@ class HeartbeatEvent:
     event_type: HeartbeatEventType
     handle: str
     search_query: str | None = None
+    search_results_total: int = 0
     discovered_posts: int = 0
     discovered_comments: int = 0
+    skipped_self_authored_count: int = 0
     item_id: str | None = None
     item_type: str | None = None
     is_relevant: bool | None = None
@@ -123,6 +129,7 @@ class SubmoltPlannerPolicy:
     topic_policy: str | None
     allowed_topics: tuple[str, ...]
     name_prefix: str | None
+    allow_crypto: bool
     policy_body: str
 
 
@@ -134,6 +141,7 @@ class SubmoltPlannerContext:
     current_utc: datetime
     last_submolt_created_at_utc: datetime | None
     hours_since_last_submolt_creation: float | None
+    recent_submolt_titles: tuple[str, ...]
     source_item_id: str | None = None
     source_item_type: str | None = None
     source_post_id: str | None = None
@@ -184,10 +192,13 @@ class AutomationService:
 
         Raises:
             FileNotFoundError: If the agent config does not exist locally.
-            ValueError: If search_query is empty or cutoff_days < 1.
+            ValueError: If search_query is empty, shorter than 3 chars, or cutoff_days < 1.
         """
-        if not search_query or not search_query.strip():
+        normalized_query = search_query.strip()
+        if not normalized_query:
             raise ValueError("Search query cannot be empty.")
+        if len(normalized_query) < MIN_SEARCH_QUERY_LENGTH:
+            raise ValueError(f"Search query must be at least {MIN_SEARCH_QUERY_LENGTH} characters.")
         if cutoff_days < 1:
             raise ValueError("Cutoff days must be at least 1.")
         self.validate_llm_config(llm_config)
@@ -199,7 +210,7 @@ class AutomationService:
 
         config = agent_store.load_agent_config(self._base_path, handle)
 
-        config.automation.search_query = search_query.strip()
+        config.automation.search_query = normalized_query
         config.automation.cutoff_days = cutoff_days
         config.automation.llm = llm_config
         config.automation.enabled = True
@@ -268,7 +279,7 @@ class AutomationService:
             1. Load AgentConfig; return if disabled or no api_key.
             2. Init DB (idempotent).
             3. Prune old items.
-            4. If no unanalyzed items exist: search + enqueue (deduped).
+            4. Run search + enqueue (deduped) every cycle.
             5. Scan unanalyzed items oldest-first in the same cycle.
             6. If search inserted zero rows and no item was acted: retry pending-action backlog.
             7. Stop scan on first acted item, or backlog exhaustion.
@@ -304,30 +315,28 @@ class AutomationService:
             execution_options=execution_options,
         )
         acted_this_cycle = planner_evaluation.acted
-        search_inserted: automation_store.InsertItemsResult | None = None
-
-        if not acted_this_cycle and not automation_store.has_unanalyzed(self._base_path, handle):
-            self._emit_heartbeat_event(
-                execution_options,
-                HeartbeatEvent(
-                    event_type=HeartbeatEventType.SEARCH_STARTED,
-                    handle=handle,
-                    search_query=config.automation.search_query,
-                    dry_run=execution_options.dry_run_actions,
-                ),
-            )
-            search_inserted = self._search_and_enqueue(handle, config)
-            self._emit_heartbeat_event(
-                execution_options,
-                HeartbeatEvent(
-                    event_type=HeartbeatEventType.SEARCH_COMPLETED,
-                    handle=handle,
-                    search_query=config.automation.search_query,
-                    discovered_posts=search_inserted.posts,
-                    discovered_comments=search_inserted.comments,
-                    dry_run=execution_options.dry_run_actions,
-                ),
-            )
+        self._emit_heartbeat_event(
+            execution_options,
+            HeartbeatEvent(
+                event_type=HeartbeatEventType.SEARCH_STARTED,
+                handle=handle,
+                search_query=config.automation.search_query,
+                dry_run=execution_options.dry_run_actions,
+            ),
+        )
+        search_inserted = self._search_and_enqueue(handle, config)
+        self._emit_heartbeat_event(
+            execution_options,
+            HeartbeatEvent(
+                event_type=HeartbeatEventType.SEARCH_COMPLETED,
+                handle=handle,
+                search_query=config.automation.search_query,
+                discovered_posts=search_inserted.posts,
+                discovered_comments=search_inserted.comments,
+                search_results_total=search_inserted.total,
+                dry_run=execution_options.dry_run_actions,
+            ),
+        )
 
         filter_prompt: str | None = None
         behavior_prompt: str | None = None
@@ -361,7 +370,7 @@ class AutomationService:
                     acted_this_cycle = True
                     break
 
-        should_retry_pending_action = not acted_this_cycle and search_inserted is not None and search_inserted.total == 0
+        should_retry_pending_action = not acted_this_cycle and search_inserted.total == 0
         if should_retry_pending_action:
             if behavior_prompt is None:
                 behavior_prompt = self._load_required_prompt(handle, "behavior")
@@ -603,6 +612,7 @@ class AutomationService:
             "topic_policy": policy.topic_policy,
             "allowed_topics": list(policy.allowed_topics),
             "name_prefix": policy.name_prefix,
+            "allow_crypto": policy.allow_crypto,
             "policy_body": policy.policy_body,
         }
         return json.dumps(payload, separators=(",", ":"))
@@ -617,6 +627,7 @@ class AutomationService:
             topic_policy=payload.get("topic_policy"),
             allowed_topics=tuple(payload.get("allowed_topics", [])),
             name_prefix=payload.get("name_prefix"),
+            allow_crypto=bool(payload.get("allow_crypto", False)),
             policy_body=str(payload.get("policy_body", "")).strip(),
         )
 
@@ -629,11 +640,13 @@ class AutomationService:
         frontmatter, policy_body = self._extract_policy_frontmatter(normalized_prompt)
 
         enabled = self._parse_policy_bool(frontmatter.get("submolt_enabled"), default=True)
-        interval_hours = self._parse_policy_int(
-            frontmatter.get("submolt_create_interval_hours"),
-            default=DEFAULT_SUBMOLT_CREATE_INTERVAL_HOURS,
-            minimum=1,
-        )
+        raw_interval_hours = frontmatter.get("submolt_create_interval_hours")
+        if raw_interval_hours is not None:
+            interval_hours = self._parse_policy_int(raw_interval_hours, default=DEFAULT_SUBMOLT_CREATE_INTERVAL_HOURS, minimum=1)
+        else:
+            interval_hours = self._parse_interval_hours_from_policy_body(policy_body)
+            if interval_hours is None:
+                interval_hours = DEFAULT_SUBMOLT_CREATE_INTERVAL_HOURS
         max_creations_per_day = self._parse_policy_int(
             frontmatter.get("submolt_max_creations_per_day"),
             default=DEFAULT_SUBMOLT_MAX_CREATIONS_PER_DAY,
@@ -642,6 +655,7 @@ class AutomationService:
         topic_policy = self._normalize_optional_policy_text(frontmatter.get("submolt_topic_policy"), MAX_SUBMOLT_POLICY_TOPIC_LENGTH)
         name_prefix = self._normalize_optional_policy_text(frontmatter.get("submolt_name_prefix"), 40)
         allowed_topics = self._parse_allowed_topics(frontmatter.get("submolt_allowed_topics"))
+        allow_crypto = self._parse_policy_bool(frontmatter.get("submolt_allow_crypto"), default=False)
 
         return SubmoltPlannerPolicy(
             enabled=enabled,
@@ -650,8 +664,40 @@ class AutomationService:
             topic_policy=topic_policy,
             allowed_topics=allowed_topics,
             name_prefix=name_prefix,
+            allow_crypto=allow_crypto,
             policy_body=policy_body,
         )
+
+    def _parse_interval_hours_from_policy_body(self, policy_body: str) -> int | None:
+        """Parse constrained natural-language cadence hints from BEHAVIOR_SUBMOLT body text."""
+        body_text = policy_body.strip().lower()
+        if not body_text:
+            return None
+
+        if "once per week" in body_text or "weekly" in body_text:
+            return 24 * 7
+        if "once per day" in body_text or "daily" in body_text:
+            return 24
+
+        weeks_match = CADENCE_EVERY_WEEKS_PATTERN.search(body_text)
+        if weeks_match:
+            return max(int(weeks_match.group(1)), 1) * 24 * 7
+
+        days_match = CADENCE_EVERY_DAYS_PATTERN.search(body_text)
+        if days_match:
+            return max(int(days_match.group(1)), 1) * 24
+
+        hours_match = CADENCE_EVERY_HOURS_PATTERN.search(body_text)
+        if hours_match:
+            return max(int(hours_match.group(1)), 1)
+
+        cadence_keywords_present = any(
+            token in body_text for token in ("once per", "every", "daily", "weekly", "hour", "day", "week")
+        )
+        if cadence_keywords_present:
+            raise ValueError("Unable to parse cadence from BEHAVIOR_SUBMOLT.md body text.")
+
+        return None
 
     def _extract_policy_frontmatter(self, prompt_text: str) -> tuple[dict[str, str], str]:
         """Extract optional YAML-like frontmatter and return remaining body text."""
@@ -739,7 +785,12 @@ class AutomationService:
     ) -> SubmoltPlannerContext:
         """Build deterministic planner context from persisted successful events."""
         now_utc = datetime.now(timezone.utc)
-        last_create_event = automation_log_store.get_last_successful_submolt_creation(self._base_path, handle)
+        recent_create_events = automation_log_store.list_recent_successful_submolt_creations(
+            self._base_path,
+            handle,
+            limit=RECENT_SUBMOLT_HISTORY_LIMIT,
+        )
+        last_create_event = recent_create_events[0] if recent_create_events else None
         if last_create_event is None:
             last_created_at = None
             elapsed_hours = None
@@ -754,12 +805,27 @@ class AutomationService:
             current_utc=now_utc,
             last_submolt_created_at_utc=last_created_at,
             hours_since_last_submolt_creation=elapsed_hours,
+            recent_submolt_titles=self._extract_recent_submolt_titles(recent_create_events),
             source_item_id=source_item.item_id if source_item else None,
             source_item_type=source_item.item_type if source_item else None,
             source_post_id=self._resolve_post_id(source_item) if source_item else None,
             source_submolt_name=source_item.submolt_name if source_item else None,
             source_item_summary=self._truncate_source_summary(source_item_summary),
         )
+
+    def _extract_recent_submolt_titles(self, events: list[automation_log_store.AutomationEvent]) -> tuple[str, ...]:
+        """Build newest-first display titles from recent successful create events."""
+        titles: list[str] = []
+        for event in events:
+            candidate_title = (event.submolt_display_name or "").strip()
+            if not candidate_title:
+                candidate_title = (event.submolt_name or "").replace("-", " ").strip().title()
+            if not candidate_title:
+                continue
+            titles.append(candidate_title[:80])
+            if len(titles) >= RECENT_SUBMOLT_HISTORY_LIMIT:
+                break
+        return tuple(titles)
 
     def _truncate_source_summary(self, value: str | None) -> str | None:
         """Normalize optional source-summary text for planner context payloads."""
@@ -777,6 +843,7 @@ class AutomationService:
         policy: SubmoltPlannerPolicy,
         planner_context: SubmoltPlannerContext,
         requested_submolt_name: str | None,
+        requested_display_name: str | None = None,
     ) -> str | None:
         """Return a skip reason when deterministic planner guards fail."""
         if planner_context.hours_since_last_submolt_creation is not None and planner_context.hours_since_last_submolt_creation < policy.interval_hours:
@@ -790,7 +857,62 @@ class AutomationService:
         if requested_submolt_name and automation_log_store.has_successful_submolt_name(self._base_path, handle, requested_submolt_name):
             return "duplicate-submolt-name"
 
+        if self._is_duplicate_or_near_duplicate_submolt(
+            requested_submolt_name=requested_submolt_name,
+            requested_display_name=requested_display_name,
+            recent_titles=planner_context.recent_submolt_titles,
+        ):
+            return "duplicate-submolt-title"
+
         return None
+
+    def _is_duplicate_or_near_duplicate_submolt(
+        self,
+        *,
+        requested_submolt_name: str | None,
+        requested_display_name: str | None,
+        recent_titles: tuple[str, ...],
+    ) -> bool:
+        """Evaluate duplicate or near-duplicate title/name collisions."""
+        candidate_values = [value for value in (requested_submolt_name, requested_display_name) if value and value.strip()]
+        if not candidate_values:
+            return False
+
+        normalized_candidates = {self._normalize_submolt_title_for_compare(value) for value in candidate_values}
+        normalized_candidates.discard("")
+        if not normalized_candidates:
+            return False
+
+        for recent_title in recent_titles:
+            normalized_recent = self._normalize_submolt_title_for_compare(recent_title)
+            if not normalized_recent:
+                continue
+
+            recent_tokens = set(normalized_recent.split())
+            for normalized_candidate in normalized_candidates:
+                if normalized_candidate == normalized_recent:
+                    return True
+
+                if normalized_candidate.startswith(normalized_recent) or normalized_recent.startswith(normalized_candidate):
+                    if len(normalized_candidate) >= 12 or len(normalized_recent) >= 12:
+                        return True
+
+                candidate_tokens = set(normalized_candidate.split())
+                if not candidate_tokens or not recent_tokens:
+                    continue
+                overlap = len(candidate_tokens & recent_tokens)
+                minimum_tokens = min(len(candidate_tokens), len(recent_tokens))
+                if minimum_tokens >= 2 and overlap >= minimum_tokens:
+                    return True
+
+        return False
+
+    def _normalize_submolt_title_for_compare(self, value: str) -> str:
+        """Normalize title-like text for duplicate detection checks."""
+        lowered = value.strip().lower().replace("-", " ")
+        lowered = re.sub(r"[^a-z0-9\s]", " ", lowered)
+        collapsed = re.sub(r"\s+", " ", lowered).strip()
+        return collapsed
 
     def _run_submolt_planner_stage(
         self,
@@ -804,18 +926,23 @@ class AutomationService:
         system_prompt: str,
     ) -> SubmoltPlannerPlan | None:
         """Execute planner stage and return parsed structured planner output."""
+        composed_system_prompt = self._compose_submolt_planner_system_prompt(
+            system_prompt=system_prompt,
+            policy=policy,
+            planner_context=planner_context,
+        )
         planner_user_prompt = self._build_submolt_planner_user_prompt(
             planner_context=planner_context,
             policy=policy,
             behavior_prompt=behavior_prompt,
         )
-        planner_prompt_payload = self._build_stage_prompt_payload(system_prompt, planner_user_prompt)
+        planner_prompt_payload = self._build_stage_prompt_payload(composed_system_prompt, planner_user_prompt)
 
         try:
             stage_result = self._llm_execution_service.plan_submolt(
                 config=config,
                 provider_config=provider_config,
-                system_prompt=system_prompt,
+                system_prompt=composed_system_prompt,
                 user_prompt=planner_user_prompt,
             )
             self._write_stage_log(
@@ -853,6 +980,7 @@ class AutomationService:
             "current_utc": planner_context.current_utc.isoformat(),
             "last_submolt_created_at_utc": planner_context.last_submolt_created_at_utc.isoformat() if planner_context.last_submolt_created_at_utc else None,
             "hours_since_last_submolt_creation": planner_context.hours_since_last_submolt_creation,
+            "recent_submolt_titles": list(planner_context.recent_submolt_titles),
             "source_item_id": planner_context.source_item_id,
             "source_item_type": planner_context.source_item_type,
             "source_post_id": planner_context.source_post_id,
@@ -864,6 +992,7 @@ class AutomationService:
                 "topic_policy": policy.topic_policy,
                 "allowed_topics": list(policy.allowed_topics),
                 "name_prefix": policy.name_prefix,
+                "allow_crypto": policy.allow_crypto,
             },
         }
         return (
@@ -939,6 +1068,7 @@ class AutomationService:
             policy=policy,
             planner_context=planner_context,
             requested_submolt_name=normalized_submolt_name,
+            requested_display_name=planner_plan.display_name,
         )
         if guard_failure_reason is not None:
             automation_log_store.write_automation_event(
@@ -984,6 +1114,7 @@ class AutomationService:
 
         display_name = planner_plan.display_name or normalized_submolt_name.replace("-", " ").title()
         description = self._resolve_planned_submolt_description(planner_plan.description, display_name)
+        effective_allow_crypto = bool(planner_plan.allow_crypto and policy.allow_crypto)
 
         created_submolt_name: str | None = None
         created_post_id: str | None = None
@@ -993,7 +1124,7 @@ class AutomationService:
                 submolt_name=normalized_submolt_name,
                 display_name=display_name,
                 description=description,
-                allow_crypto=planner_plan.allow_crypto,
+                allow_crypto=effective_allow_crypto,
             )
             created_submolt_name = submolt_response.name
             automation_log_store.write_automation_event(
@@ -1003,6 +1134,7 @@ class AutomationService:
                 source_trigger=source_trigger,
                 status=AutomationEventStatus.SUCCESS,
                 submolt_name=created_submolt_name,
+                submolt_display_name=display_name,
                 source_item_id=planner_context.source_item_id,
             )
         except (MoltbookAPIError, ValueError) as exc:
@@ -1014,6 +1146,7 @@ class AutomationService:
                 source_trigger=source_trigger,
                 status=AutomationEventStatus.FAILED,
                 submolt_name=normalized_submolt_name,
+                submolt_display_name=display_name,
                 source_item_id=planner_context.source_item_id,
                 error_summary=reason,
             )
@@ -1312,15 +1445,18 @@ class AutomationService:
                     item_type=result.type,
                     post_id=result.post_id,
                     submolt_name=result.submolt.name if result.submolt else None,
+                    author_name=result.author.name,
                     created_at=now,
                 )
             )
 
         inserted = automation_store.insert_items(self._base_path, handle, queue_items)
         logger.info(
-            "Inserted %d new items (of %d search results) for '%s'.",
+            "Inserted %d new items (posts=%d comments=%d) from %d search results for '%s'.",
             inserted.total,
-            len(queue_items),
+            inserted.posts,
+            inserted.comments,
+            len(response.results),
             handle,
         )
         return inserted
@@ -1479,6 +1615,54 @@ class AutomationService:
         execution_options: HeartbeatExecutionOptions,
     ) -> ItemProcessingOutcome:
         """Execute action stage for an item already classified as relevant."""
+        resolved_author_name = self._resolve_queue_item_author_name(
+            api_key=config.agent.api_key,
+            item=item,
+            post_id=post_id,
+        )
+        if resolved_author_name is None:
+            self._finalize_item(
+                handle,
+                item.item_id,
+                is_relevant=True,
+                relevance_rationale="author-unresolved",
+            )
+            self._write_action_outcome_log(
+                handle=handle,
+                item_id=item.item_id,
+                replied_item_id=None,
+                reply_text=None,
+                upvote_requested=False,
+                upvote_attempted=False,
+                upvote_performed=False,
+                upvote_target_type=None,
+                upvote_target_id=None,
+                upvote_error="author-unresolved",
+                dry_run=execution_options.dry_run_actions,
+            )
+            return ItemProcessingOutcome.RELEVANT_NOT_ACTED
+
+        if self._is_self_authored_target(handle=handle, author_name=resolved_author_name):
+            self._finalize_item(
+                handle,
+                item.item_id,
+                is_relevant=True,
+                relevance_rationale="self-authored-item",
+            )
+            self._write_action_outcome_log(
+                handle=handle,
+                item_id=item.item_id,
+                replied_item_id=None,
+                reply_text=None,
+                upvote_requested=False,
+                upvote_attempted=False,
+                upvote_performed=False,
+                upvote_target_type=None,
+                upvote_target_id=None,
+                upvote_error="self-authored-item",
+                dry_run=execution_options.dry_run_actions,
+            )
+            return ItemProcessingOutcome.RELEVANT_NOT_ACTED
 
         if behavior_prompt is None:
             self._finalize_item(
@@ -1804,6 +1988,7 @@ class AutomationService:
                 topic_policy=action_plan.promotion_topic,
                 allowed_topics=policy.allowed_topics,
                 name_prefix=policy.name_prefix,
+                allow_crypto=policy.allow_crypto,
                 policy_body=policy.policy_body,
             )
 
@@ -2096,6 +2281,42 @@ class AutomationService:
             return None
 
         return normalized[:MAX_ACTION_REPLY_CHARACTERS]
+
+    def _compose_submolt_planner_system_prompt(
+        self,
+        *,
+        system_prompt: str,
+        policy: SubmoltPlannerPolicy,
+        planner_context: SubmoltPlannerContext,
+    ) -> str:
+        """Compose runtime planner guardrail instructions with immutable constraints."""
+        try:
+            runtime_guardrail = (
+                "\n\nRUNTIME GUARDRAILS (NON-OVERRIDABLE):\n"
+                "- Treat this as strict policy.\n"
+                "- Never propose duplicate or near-duplicate submolts.\n"
+                "- Compare your proposal to recent_submolt_titles in Context JSON and decline duplicates.\n"
+                "- Default allow_crypto to false.\n"
+                f"- Policy allow_crypto is currently {str(policy.allow_crypto).lower()}; set allow_crypto=true only when this value is true and the plan explicitly requires it.\n"
+                "- If cadence is not satisfied or confidence is low, set should_create_submolt=false.\n"
+                f"- Recent submolt titles count: {len(planner_context.recent_submolt_titles)}.\n"
+            )
+            return f"{system_prompt.strip()}{runtime_guardrail}"
+        except Exception:
+            logger.warning("Failed to compose runtime submolt planner guardrails; using base system prompt.")
+            return system_prompt
+
+    def _resolve_queue_item_author_name(self, *, api_key: str, item: QueueItem, post_id: str) -> str | None:
+        """Resolve queue-item author with persisted metadata first and API fallback second."""
+        if item.author_name and item.author_name.strip():
+            return item.author_name.strip()
+
+        search_service = SearchService(api_client=self._api)
+        return search_service.get_queue_item_author_name(api_key, item.item_type, item.item_id, post_id)
+
+    def _is_self_authored_target(self, *, handle: str, author_name: str) -> bool:
+        """Return True when a target author resolves to the current handle."""
+        return handle.strip().lower() == author_name.strip().lower()
 
     def _extract_reply_item_id(self, response: dict[str, object]) -> str | None:
         """Extract reply item ID from Moltbook add-comment response payload."""
