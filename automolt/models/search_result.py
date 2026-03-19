@@ -29,7 +29,7 @@ class SearchResult(BaseModel):
     id: str
     type: str = Field(description="Either 'post' or 'comment'")
     title: str | None = None
-    content: str
+    content: str | None = None
     upvotes: int = 0
     downvotes: int = 0
     similarity: float | None = Field(default=None, ge=0.0, le=1.0)

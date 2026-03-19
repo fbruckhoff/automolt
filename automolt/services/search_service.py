@@ -10,6 +10,8 @@ from automolt.api.client import MoltbookAPIError, MoltbookClient
 from automolt.models.search_result import SearchResponse, SearchResult
 
 logger = logging.getLogger(__name__)
+MIN_SEARCH_QUERY_LENGTH = 3
+MAX_SEARCH_QUERY_LENGTH = 500
 
 
 class SearchService:
@@ -32,15 +34,19 @@ class SearchService:
 
         Raises:
             MoltbookAPIError: If the API call fails.
-            ValueError: If query exceeds 500 characters.
+            ValueError: If query is shorter than 3 or exceeds 500 characters.
         """
-        if len(query) > 500:
-            raise ValueError("Search query must be 500 characters or fewer.")
+        normalized_query = query.strip()
+        if len(normalized_query) < MIN_SEARCH_QUERY_LENGTH:
+            raise ValueError(f"Search query must be at least {MIN_SEARCH_QUERY_LENGTH} characters.")
+
+        if len(normalized_query) > MAX_SEARCH_QUERY_LENGTH:
+            raise ValueError(f"Search query must be {MAX_SEARCH_QUERY_LENGTH} characters or fewer.")
 
         if limit < 1 or limit > 50:
             raise ValueError("Limit must be between 1 and 50.")
 
-        raw_response = self._api.search(api_key, query, search_type, limit)
+        raw_response = self._api.search(api_key, normalized_query, search_type, limit)
         return SearchResponse.model_validate(raw_response)
 
     def get_full_content(self, api_key: str, result: SearchResult) -> str | None:
@@ -63,6 +69,25 @@ class SearchService:
                 return self._get_comment_content(api_key, result.post_id, result.id)
         except MoltbookAPIError as exc:
             logger.debug("Failed to fetch full content for %s %s: %s", result.type, result.id, exc.message)
+        return None
+
+    def get_queue_item_author_name(
+        self,
+        api_key: str,
+        item_type: str,
+        item_id: str,
+        post_id: str,
+    ) -> str | None:
+        """Resolve author name for a queue item using canonical API payloads."""
+        try:
+            if item_type == "post":
+                return self._get_post_author_name(api_key, post_id)
+
+            if item_type == "comment":
+                return self._get_comment_author_name(api_key, post_id, item_id)
+        except MoltbookAPIError as exc:
+            logger.debug("Failed to fetch queue item author for %s %s: %s", item_type, item_id, exc.message)
+
         return None
 
     def get_queue_item_content(
@@ -104,11 +129,28 @@ class SearchService:
         post = data.get("post", data)
         return post.get("content")
 
+    def _get_post_author_name(self, api_key: str, post_id: str) -> str | None:
+        """Fetch author name for a single post."""
+        data = self._api.get_post(api_key, post_id)
+        post = data.get("post", data)
+        author = post.get("author", {}) if isinstance(post, dict) else {}
+        if isinstance(author, dict):
+            name = author.get("name")
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+        return None
+
     def _get_comment_content(self, api_key: str, post_id: str, comment_id: str) -> str | None:
         """Fetch full content for a comment by searching the comment tree."""
         data = self._api.get_comments(api_key, post_id)
         comments = data.get("comments", [])
         return _find_comment_in_tree(comments, comment_id)
+
+    def _get_comment_author_name(self, api_key: str, post_id: str, comment_id: str) -> str | None:
+        """Fetch author name for a comment by searching the comment tree."""
+        data = self._api.get_comments(api_key, post_id)
+        comments = data.get("comments", [])
+        return _find_comment_author_in_tree(comments, comment_id)
 
 
 def _find_comment_in_tree(comments: list[dict[str, Any]], comment_id: str) -> str | None:
@@ -127,6 +169,24 @@ def _find_comment_in_tree(comments: list[dict[str, Any]], comment_id: str) -> st
         replies = comment.get("replies", [])
         if replies:
             found = _find_comment_in_tree(replies, comment_id)
+            if found is not None:
+                return found
+    return None
+
+
+def _find_comment_author_in_tree(comments: list[dict[str, Any]], comment_id: str) -> str | None:
+    """Recursively search a nested comment tree for a comment author by ID."""
+    for comment in comments:
+        if comment.get("id") == comment_id:
+            author = comment.get("author", {})
+            if isinstance(author, dict):
+                name = author.get("name")
+                if isinstance(name, str) and name.strip():
+                    return name.strip()
+            return None
+        replies = comment.get("replies", [])
+        if replies:
+            found = _find_comment_author_in_tree(replies, comment_id)
             if found is not None:
                 return found
     return None
