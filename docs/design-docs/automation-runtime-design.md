@@ -24,11 +24,12 @@ The automation subsystem runs periodic heartbeat cycles for one target agent and
 A heartbeat cycle is modeled as:
 
 1. preflight validation (automation enabled, keys/config/prompt prerequisites),
-2. planner-first policy refresh and deterministic guard evaluation (`BEHAVIOR_SUBMOLT.md` fingerprint + parsed policy),
+2. planner-first policy refresh and deterministic guard evaluation (`BEHAVIOR_SUBMOLT.md` fingerprint + parsed policy including cadence fallback parsing and crypto policy),
 3. optional planner execution and side effects (`create_submolt`, optional `create_post`) with event persistence,
-4. queue maintenance (initialize, prune, refill when needed) only when planner did not act,
+4. queue maintenance (initialize, prune, and search refill every cycle with dedupe),
 5. analysis/action scan over candidates, including optional reactive planner escalation from action output,
-6. persistence of cycle completion timestamp and observable outcomes.
+6. deterministic action-time safety checks to prevent commenting on self-authored targets,
+7. persistence of cycle completion timestamp and observable outcomes.
 
 This keeps command surfaces (`tick`, `start`, `monitor`, `status`) thin while centralizing execution semantics in service code.
 
@@ -45,10 +46,11 @@ Foreground and background runtime share due-time semantics:
 - Setup completeness is enforced before runtime side effects.
 - Read-only queue inspection (`automation list`) remains decoupled from provider auth prerequisites.
 - Action policy constraints (for example, no automated downvotes) are explicit service-level behavior.
-- Planner cadence/rate controls (interval, max/day, duplicate-name protection) are deterministic runtime guards, not model-only policy.
+- Planner cadence/rate controls (interval, max/day, duplicate and near-duplicate prevention, crypto default-deny) are deterministic runtime guards, not model-only policy.
 - Planner parse/prompt failures are observable events and do not block heartbeat timestamp persistence.
+- Queue rows persist source author metadata when available, and legacy rows use API fallback author resolution before comment writes.
 
 ## Verification status
 
-- **Verified:** 2026-03-17
-- **Verified against:** `services/automation_service.py`, `services/scheduler_service.py`, `services/llm_execution_service.py`, `persistence/automation_store.py`, `persistence/automation_log_store.py`, `persistence/scheduler_store.py`, and `commands/automation/reload_command.py`.
+- **Verified:** 2026-03-19
+- **Verified against:** `services/automation_service.py`, `services/search_service.py`, `services/scheduler_service.py`, `services/llm_execution_service.py`, `persistence/automation_store.py`, `persistence/automation_log_store.py`, `persistence/scheduler_store.py`, and `commands/automation/reload_command.py`.

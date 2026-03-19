@@ -135,6 +135,7 @@ Columns:
 - `item_type` (`post` or `comment`)
 - `post_id`
 - `submolt_name`
+- `author_name`
 - `analyzed`
 - `is_relevant`
 - `relevance_rationale`
@@ -197,6 +198,8 @@ Planner/runtime events are also persisted in:
 - `.agents/<handle>/logs/automation-events.jsonl`
 
 Event payloads include event type, trigger source (`scheduled`/`reactive`), status (`success`/`failed`/`skipped`), timestamps, and optional submolt/post/source-item fields.
+
+For successful `create_submolt` planner events, payloads may include `submolt_display_name` to support recent-title context and duplicate/near-duplicate detection.
 
 Exact separator:
 
@@ -422,7 +425,7 @@ Status payload includes mode, running/stopped timestamps, duration, cycle count,
 3. init DB + prune old un-acted items (`replied_item_id` null/empty) older than cutoff.
 4. planner-first phase: detect `BEHAVIOR_SUBMOLT.md` fingerprint changes, refresh/parse policy, run deterministic guards, and optionally execute planner create/post side effects.
 5. if planner acted, skip queue processing for that cycle (one-step-per-cycle behavior).
-6. otherwise, conditional refill: if no unanalyzed items, run search and enqueue.
+6. run search and enqueue every cycle (dedupe still enforced by queue primary key).
 7. same-cycle scan loop over oldest unanalyzed items.
 8. if search inserted zero new rows and no item was acted in the cycle, retry pending-action backlog oldest-first.
 9. persist `last_heartbeat_at` once at cycle end, including cycles where planner fails.
@@ -449,6 +452,7 @@ Notes:
 - relevant-but-not-acted remains a visibility state in queue listing,
 - pending-action retries are fallback-only (triggered after zero-result refill),
 - cycle-level timestamp is persisted once at completion (not per item).
+- reply posting includes deterministic self-author safety checks: queue author metadata is used first, then API fallback author resolution for legacy rows; self-authored targets are finalized as relevant-not-acted with rationale `self-authored-item`.
 
 ---
 
@@ -467,6 +471,8 @@ Prompt scope separation:
 - submolt planner stage composes:
   - `SUBMOLT_PLANNER_SYS.md` (system-level planner contract), and
   - per-agent `BEHAVIOR_SUBMOLT.md` (cadence/topic/policy guidance).
+
+Planner runtime prompt composition also appends non-overridable guardrails at execution time so customized `SUBMOLT_PLANNER_SYS.md` files still enforce: duplicate/near-duplicate refusal, explicit comparison against `recent_submolt_titles`, and crypto default-deny unless policy explicitly allows it.
 
 Analysis (`AnalysisDecision`):
 
@@ -488,6 +494,14 @@ Submolt planner (`SubmoltPlannerPlan`):
 - `should_post`, `post_title`, `post_content`, `post_url`
 - `should_link_in_followup_reply`, `followup_reply_text`
 - `decision_rationale`
+
+Planner deterministic guards are enforced before and after planner model execution:
+
+- cadence (`interval_hours`) including constrained prose parsing fallback when frontmatter cadence is absent,
+- max creations per day,
+- exact duplicate slug checks,
+- near-duplicate checks against recent successful submolt titles,
+- crypto execution policy (`allow_crypto` forced false unless `submolt_allow_crypto: true` policy).
 
 Action prompt contract includes strict policy language:
 
