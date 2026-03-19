@@ -7,12 +7,18 @@ via the Moltbook API, and persisting agent configuration locally.
 from pathlib import Path
 
 from automolt.api.client import MoltbookAPIError, MoltbookClient
-from automolt.models.agent import Agent, AgentConfig, AgentRegistrationResponse, VerificationStatus
+from automolt.models.agent import (
+    Agent,
+    AgentConfig,
+    AgentRegistrationResponse,
+    VerificationStatus,
+)
 from automolt.persistence.agent_store import (
     agent_exists_locally,
     load_agent_config,
     save_agent_config,
 )
+
 
 class AgentService:
     """Service for agent-related operations like signup."""
