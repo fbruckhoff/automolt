@@ -12,6 +12,7 @@ class QueueItem(BaseModel):
     item_type: str = Field(description="Either 'post' or 'comment'")
     post_id: str | None = Field(default=None, description="Parent post ID. For post items, usually equals item_id.")
     submolt_name: str | None = None
+    author_name: str | None = None
     analyzed: bool = False
     is_relevant: bool = False
     relevance_rationale: str | None = None

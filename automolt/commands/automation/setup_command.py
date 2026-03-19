@@ -33,6 +33,7 @@ from automolt.services.automation_service import AutomationService
 from automolt.services.llm_provider_service import LLMProviderService
 
 SEARCH_QUERY_MAX_LENGTH = 500
+SEARCH_QUERY_MIN_LENGTH = 3
 OPENAI_API_KEY_PREFIX = "sk-"
 MIN_REQUIRED_PROMPT_CHARACTERS = 10
 
@@ -466,6 +467,8 @@ def _collect_missing_setup_requirements(
     search_query = (config.automation.search_query or "").strip()
     if not search_query:
         missing.append("search query is missing (run interactive setup).")
+    elif len(search_query) < SEARCH_QUERY_MIN_LENGTH:
+        missing.append(f"search query must be at least {SEARCH_QUERY_MIN_LENGTH} characters (run interactive setup).")
 
     if config.automation.cutoff_days < 1:
         missing.append("cutoff days must be at least 1 (run interactive setup).")
@@ -542,7 +545,7 @@ def _prompt_search_query(console: Console, default_query: str | None = None) -> 
     """Prompt the user for a Moltbook semantic search query.
 
     Returns:
-        A validated, non-empty search query string.
+        A validated search query string between 3 and 500 characters.
     """
     normalized_default = (default_query or "").strip() or None
 
@@ -555,6 +558,10 @@ def _prompt_search_query(console: Console, default_query: str | None = None) -> 
 
         if not query:
             console.print("[red]Search query cannot be empty.[/red]")
+            continue
+
+        if len(query) < SEARCH_QUERY_MIN_LENGTH:
+            console.print(f"[red]Query must be at least {SEARCH_QUERY_MIN_LENGTH} characters (currently {len(query)}).[/red]")
             continue
 
         if len(query) > SEARCH_QUERY_MAX_LENGTH:
