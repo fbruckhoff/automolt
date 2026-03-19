@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS runtime_state (
 
 POST_ID_COLUMN_NAME = "post_id"
 RELEVANCE_RATIONALE_COLUMN_NAME = "relevance_rationale"
+AUTHOR_NAME_COLUMN_NAME = "author_name"
 
 
 @dataclass(frozen=True)
@@ -108,6 +109,9 @@ def _ensure_items_table_schema(conn: sqlite3.Connection) -> None:
 
     if RELEVANCE_RATIONALE_COLUMN_NAME not in columns:
         conn.execute("ALTER TABLE items ADD COLUMN relevance_rationale TEXT")
+
+    if AUTHOR_NAME_COLUMN_NAME not in columns:
+        conn.execute("ALTER TABLE items ADD COLUMN author_name TEXT")
 
 
 def prune_old_items(base_path: Path, handle: str, cutoff_days: int) -> int:
@@ -240,12 +244,13 @@ def insert_items(base_path: Path, handle: str, items: list[QueueItem]) -> Insert
     with sqlite3.connect(db_path) as conn:
         for item in items:
             cursor = conn.execute(
-                "INSERT OR IGNORE INTO items (item_id, item_type, post_id, submolt_name, analyzed, is_relevant, relevance_rationale, replied_item_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO items (item_id, item_type, post_id, submolt_name, author_name, analyzed, is_relevant, relevance_rationale, replied_item_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     item.item_id,
                     item.item_type,
                     item.post_id,
                     item.submolt_name,
+                    item.author_name,
                     int(item.analyzed),
                     int(item.is_relevant),
                     item.relevance_rationale,
@@ -385,11 +390,13 @@ def _resolve_list_query(status_filter: str, apply_limit: bool) -> str:
 def _row_to_queue_item(row: sqlite3.Row) -> QueueItem:
     """Convert a SQLite Row to a QueueItem model instance."""
     post_id = row["post_id"] if "post_id" in row.keys() else None
+    author_name = row["author_name"] if "author_name" in row.keys() else None
     return QueueItem(
         item_id=row["item_id"],
         item_type=row["item_type"],
         post_id=post_id,
         submolt_name=row["submolt_name"],
+        author_name=author_name,
         analyzed=bool(row["analyzed"]),
         is_relevant=bool(row["is_relevant"]),
         relevance_rationale=row["relevance_rationale"] if "relevance_rationale" in row.keys() else None,

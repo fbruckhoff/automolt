@@ -31,7 +31,9 @@ DEFAULT_SYSTEM_PROMPTS: dict[str, str] = {
         "description (string|null), allow_crypto (boolean), should_post (boolean), "
         "post_title (string|null), post_content (string|null), post_url (string|null), "
         "should_link_in_followup_reply (boolean), followup_reply_text (string|null), "
-        "decision_rationale (string). Do NOT use markdown fences (```) and do not include any prose."
+        "decision_rationale (string). Avoid duplicate or near-duplicate submolt ideas, treat crypto as disallowed by default, "
+        "and only set allow_crypto=true when behavior policy explicitly allows it. "
+        "Do NOT use markdown fences (```) and do not include any prose."
     ),
 }
 

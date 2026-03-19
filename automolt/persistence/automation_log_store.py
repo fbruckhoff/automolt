@@ -35,6 +35,7 @@ class AutomationEvent:
     status: AutomationEventStatus
     created_at_utc: datetime
     submolt_name: str | None = None
+    submolt_display_name: str | None = None
     post_id: str | None = None
     source_item_id: str | None = None
     error_summary: str | None = None
@@ -87,6 +88,7 @@ def write_automation_event(
     status: AutomationEventStatus,
     created_at_utc: datetime | None = None,
     submolt_name: str | None = None,
+    submolt_display_name: str | None = None,
     post_id: str | None = None,
     source_item_id: str | None = None,
     error_summary: str | None = None,
@@ -105,6 +107,7 @@ def write_automation_event(
         status=status,
         created_at_utc=created_at,
         submolt_name=submolt_name,
+        submolt_display_name=submolt_display_name,
         post_id=post_id,
         source_item_id=source_item_id,
         error_summary=error_summary,
@@ -116,6 +119,7 @@ def write_automation_event(
         "status": event.status.value,
         "created_at_utc": event.created_at_utc.isoformat(),
         "submolt_name": event.submolt_name,
+        "submolt_display_name": event.submolt_display_name,
         "post_id": event.post_id,
         "source_item_id": event.source_item_id,
         "error_summary": event.error_summary,
@@ -154,6 +158,7 @@ def list_automation_events(base_path: Path, handle: str, *, limit: int | None = 
                     status=status,
                     created_at_utc=created_at,
                     submolt_name=payload.get("submolt_name"),
+                    submolt_display_name=payload.get("submolt_display_name"),
                     post_id=payload.get("post_id"),
                     source_item_id=payload.get("source_item_id"),
                     error_summary=payload.get("error_summary"),
@@ -208,3 +213,15 @@ def has_successful_submolt_name(base_path: Path, handle: str, submolt_name: str)
         if candidate_name == normalized_name:
             return True
     return False
+
+
+def list_recent_successful_submolt_creations(base_path: Path, handle: str, *, limit: int = 10) -> list[AutomationEvent]:
+    """Return recent successful create_submolt events newest-first."""
+    bounded_limit = max(limit, 1)
+    successful_events: list[AutomationEvent] = []
+    for event in list_automation_events(base_path, handle):
+        if event.event_type == "create_submolt" and event.status == AutomationEventStatus.SUCCESS:
+            successful_events.append(event)
+            if len(successful_events) >= bounded_limit:
+                break
+    return successful_events
