@@ -1,12 +1,14 @@
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from automolt.api.client import MoltbookAPIError, MoltbookClient
 from automolt.models.llm import ActionPlan
 from automolt.models.submolt import SubmoltCreateResponse
-from automolt.persistence import prompt_store
-from automolt.services.automation_service import AutomationService
+from automolt.persistence import automation_log_store, prompt_store
+from automolt.persistence.automation_log_store import AutomationEventStatus
+from automolt.services.automation_service import AutomationService, SubmoltPlannerContext, SubmoltPlannerPolicy
 
 
 class SubmoltPlannerRuntimeTests(unittest.TestCase):
@@ -57,6 +59,29 @@ submolt_create_interval_hours: 0
 ---
 invalid
 """,
+        )
+
+        with self.assertRaises(ValueError):
+            self.service.reload_submolt_policy(self.handle)
+
+    def test_reload_submolt_policy_parses_weekly_cadence_from_body(self) -> None:
+        prompt_store.write_prompt(
+            self.base_path,
+            self.handle,
+            "behavior_submolt",
+            "Create one new submolt once per week when needed.",
+        )
+
+        policy = self.service.reload_submolt_policy(self.handle)
+
+        self.assertEqual(24 * 7, policy.interval_hours)
+
+    def test_reload_submolt_policy_rejects_unparseable_cadence_keywords(self) -> None:
+        prompt_store.write_prompt(
+            self.base_path,
+            self.handle,
+            "behavior_submolt",
+            "Create content every often and adapt quickly.",
         )
 
         with self.assertRaises(ValueError):
@@ -129,6 +154,92 @@ invalid
         self.assertEqual(2, len(retrying_service.calls))
         self.assertNotEqual(retrying_service.calls[0], retrying_service.calls[1])
         self.assertEqual(result.name, retrying_service.calls[1])
+
+    def test_build_submolt_planner_context_includes_recent_titles(self) -> None:
+        now = datetime.now(timezone.utc)
+        automation_log_store.write_automation_event(
+            self.base_path,
+            self.handle,
+            event_type="create_submolt",
+            source_trigger="scheduled",
+            status=AutomationEventStatus.SUCCESS,
+            created_at_utc=now - timedelta(days=2),
+            submolt_name="focus-lab",
+            submolt_display_name="Focus Lab",
+        )
+        automation_log_store.write_automation_event(
+            self.base_path,
+            self.handle,
+            event_type="create_submolt",
+            source_trigger="scheduled",
+            status=AutomationEventStatus.SUCCESS,
+            created_at_utc=now - timedelta(days=1),
+            submolt_name="recovery-lab",
+            submolt_display_name="Recovery Lab",
+        )
+
+        context = self.service._build_submolt_planner_context(handle=self.handle, source_trigger="scheduled")
+
+        self.assertIsNotNone(context.last_submolt_created_at_utc)
+        self.assertEqual(("Recovery Lab", "Focus Lab"), context.recent_submolt_titles)
+
+    def test_duplicate_or_near_duplicate_submolt_guard_detects_collisions(self) -> None:
+        policy = SubmoltPlannerPolicy(
+            enabled=True,
+            interval_hours=1,
+            max_creations_per_day=3,
+            topic_policy=None,
+            allowed_topics=(),
+            name_prefix=None,
+            allow_crypto=False,
+            policy_body="",
+        )
+        planner_context = SubmoltPlannerContext(
+            source_trigger="scheduled",
+            current_utc=datetime.now(timezone.utc),
+            last_submolt_created_at_utc=None,
+            hours_since_last_submolt_creation=None,
+            recent_submolt_titles=("Sleep Focus Weekly",),
+        )
+
+        reason = self.service._evaluate_submolt_runtime_guards(
+            handle=self.handle,
+            policy=policy,
+            planner_context=planner_context,
+            requested_submolt_name="sleep-focus-weekly-lab",
+            requested_display_name="Sleep Focus Weekly Lab",
+        )
+
+        self.assertEqual("duplicate-submolt-title", reason)
+
+    def test_compose_submolt_planner_system_prompt_appends_runtime_guardrails(self) -> None:
+        policy = SubmoltPlannerPolicy(
+            enabled=True,
+            interval_hours=24,
+            max_creations_per_day=1,
+            topic_policy=None,
+            allowed_topics=(),
+            name_prefix=None,
+            allow_crypto=False,
+            policy_body="",
+        )
+        planner_context = SubmoltPlannerContext(
+            source_trigger="scheduled",
+            current_utc=datetime.now(timezone.utc),
+            last_submolt_created_at_utc=None,
+            hours_since_last_submolt_creation=None,
+            recent_submolt_titles=("Focus Lab",),
+        )
+
+        composed = self.service._compose_submolt_planner_system_prompt(
+            system_prompt="Base system prompt.",
+            policy=policy,
+            planner_context=planner_context,
+        )
+
+        self.assertIn("RUNTIME GUARDRAILS", composed)
+        self.assertIn("Never propose duplicate or near-duplicate submolts", composed)
+        self.assertIn("allow_crypto", composed)
 
 
 if __name__ == "__main__":

@@ -55,6 +55,7 @@ class AutomationLogStoreTests(unittest.TestCase):
             status=AutomationEventStatus.SUCCESS,
             created_at_utc=now - timedelta(hours=1),
             submolt_name="alpha-lab",
+            submolt_display_name="Alpha Lab",
         )
         automation_log_store.write_automation_event(
             self.base_path,
@@ -76,9 +77,48 @@ class AutomationLogStoreTests(unittest.TestCase):
         self.assertIsNotNone(last_success)
         assert last_success is not None
         self.assertEqual("alpha-lab", last_success.submolt_name)
+        self.assertEqual("Alpha Lab", last_success.submolt_display_name)
         self.assertEqual(1, count_today)
         self.assertTrue(automation_log_store.has_successful_submolt_name(self.base_path, self.handle, "alpha-lab"))
         self.assertFalse(automation_log_store.has_successful_submolt_name(self.base_path, self.handle, "beta-lab"))
+
+    def test_list_recent_successful_submolt_creations_honors_limit(self) -> None:
+        now = datetime.now(timezone.utc)
+        automation_log_store.write_automation_event(
+            self.base_path,
+            self.handle,
+            event_type="create_submolt",
+            source_trigger="scheduled",
+            status=AutomationEventStatus.SUCCESS,
+            created_at_utc=now - timedelta(hours=3),
+            submolt_name="alpha-lab",
+            submolt_display_name="Alpha Lab",
+        )
+        automation_log_store.write_automation_event(
+            self.base_path,
+            self.handle,
+            event_type="create_post",
+            source_trigger="scheduled",
+            status=AutomationEventStatus.SUCCESS,
+            created_at_utc=now - timedelta(hours=2),
+            submolt_name="alpha-lab",
+        )
+        automation_log_store.write_automation_event(
+            self.base_path,
+            self.handle,
+            event_type="create_submolt",
+            source_trigger="scheduled",
+            status=AutomationEventStatus.SUCCESS,
+            created_at_utc=now - timedelta(hours=1),
+            submolt_name="beta-lab",
+            submolt_display_name="Beta Lab",
+        )
+
+        recent = automation_log_store.list_recent_successful_submolt_creations(self.base_path, self.handle, limit=1)
+
+        self.assertEqual(1, len(recent))
+        self.assertEqual("beta-lab", recent[0].submolt_name)
+        self.assertEqual("Beta Lab", recent[0].submolt_display_name)
 
 
 if __name__ == "__main__":
