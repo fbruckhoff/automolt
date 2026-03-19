@@ -1,3 +1,36 @@
+## v0.11.0 (2026-03-19)
+
+### chore
+
+- update version to 0.10.0 in uv.lock
+
+### docs
+
+- archive completed automation setup and submolt autonomy ExecPlans
+- complete submolt behavior execution plan
+- update automation design verification dates
+- remove avatar references from documentation
+- update design doc references and remove obsolete docs
+
+### feat
+
+- **cli**: add search query validation to automation setup
+- **persistence**: add author name tracking and schema updates
+- **automation**: enhance planner guardrails and search integration
+- **search**: add query length validation and constants
+
+### refactor
+
+- **profile**: remove avatar upload functionality
+
+### style
+
+- **agents**: format import statement for VerificationStatus
+
+### test
+
+- add coverage for automation and search services
+
 ## v0.10.0 (2026-03-17)
 
 ### build
