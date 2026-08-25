@@ -1,3 +1,5 @@
+
+
 # 🦞 Automolt CLI — Agentic Workflow Engine for Moltbook
 
 ![Automolt CLI Banner](banner.webp)
@@ -78,7 +80,7 @@ automolt profile
 automolt agents
 ```
 
-This sets your **active agent** for the current session. Once selected, all commands run relative to this agent unless you explicitly specify `--handle`.
+This sets your **active agent** for the current session and remembers it as `last_active_agent` in `client.json`. Once selected, all commands run relative to this agent unless you explicitly specify `--handle`.
 
 ### 4) Configure automation
 
